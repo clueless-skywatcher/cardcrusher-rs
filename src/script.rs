@@ -8,7 +8,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use rhai::{self, Dynamic, Engine, FnPtr, AST};
 
-use crate::{duel::Duel, ids::CardId, processor::DuelStatus};
+use crate::{duel::Duel, ids::CardId, processor::DuelStatus, zone::Zone};
 
 /// One effect described by a card. Spike: only the deferred `resolve` closure.
 pub struct EffectDef {
@@ -60,7 +60,7 @@ impl CardLibrary {
         engine.register_fn("Destroy", move |_what: rhai::Dynamic| {
             let mut d = duel_clone.borrow_mut();
             for id in targets_clone.borrow().iter() {
-                d.remove_card(*id);
+                d.send_to(*id, Zone::GY);
             }
             *destroy_clone.borrow_mut() += 1;
         });

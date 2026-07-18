@@ -6,6 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use cardcrusher::card::Card;
 use cardcrusher::duel::Duel;
 use cardcrusher::script::CardLibrary;
+use cardcrusher::zone::Zone;
 
 /// Loading a card runs its entry function, which describes the card by
 /// registering exactly one activate effect. Registering does nothing else yet.
@@ -21,7 +22,7 @@ fn loading_a_card_registers_its_effect() {
 }
 
 /// The payoff: a `resolve` closure defined when the card loaded runs LATER and
-/// destroys the targeted card in the shared, real duel.
+/// destroys the targeted card — sending it to the graveyard in the real duel.
 #[test]
 fn resolving_an_effect_destroys_the_targeted_card() {
     let duel = Rc::new(RefCell::new(Duel::new()));
@@ -35,8 +36,9 @@ fn resolving_an_effect_destroys_the_targeted_card() {
     lib.answer_target(vec![monster]);
     lib.resolve(0);
 
-    assert!(
-        duel.borrow().get_card(monster).is_none(),
-        "resolve should have destroyed the real card"
+    assert_eq!(
+        duel.borrow().zone_of(monster),
+        Some(Zone::GY),
+        "destroy should send the card to the graveyard"
     );
 }

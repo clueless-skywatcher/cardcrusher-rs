@@ -21,7 +21,7 @@
 //! **Why a stack of steps instead of normal function calls?** Because the engine
 //! must be able to *freeze* mid-job (to ask a human "which card?") and thaw later
 //! exactly where it left off. A paused note on a stack can do that; a half-finished
-//! C++ call cannot. (That freeze/thaw is Milestone 4.)
+//! normal function call cannot.
 
 pub type Step = u16;
 pub type DuelMessage = u8;
@@ -29,7 +29,7 @@ pub type DuelMessage = u8;
 #[derive(Debug)]
 pub enum Processor {
     Startup { step: Step },
-    Turn { step: Step },
+    Turn { step: Step, player: u8 },
     SelectCard { step: Step },
 }
 
@@ -44,6 +44,14 @@ pub enum DuelStatus {
 pub const MSG_STARTUP: DuelMessage = 1;
 pub const MSG_NEW_TURN: DuelMessage = 2;
 pub const MSG_SELECT_CARD: DuelMessage = 3;
+
+/// Phase-entry message codes — one per phase of a turn.
+pub const MSG_PHASE_DRAW: DuelMessage = 10;
+pub const MSG_PHASE_STANDBY: DuelMessage = 11;
+pub const MSG_PHASE_MAIN1: DuelMessage = 12;
+pub const MSG_PHASE_BATTLE: DuelMessage = 13;
+pub const MSG_PHASE_MAIN2: DuelMessage = 14;
+pub const MSG_PHASE_END: DuelMessage = 15;
 
 impl Processor {
     /// Does pausing on this task mean we must stop and ask a human?

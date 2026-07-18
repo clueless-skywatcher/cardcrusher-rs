@@ -7,6 +7,7 @@ use cardcrusher::card::Card;
 use cardcrusher::duel::Duel;
 use cardcrusher::processor::DuelStatus;
 use cardcrusher::script::CardLibrary;
+use cardcrusher::zone::Zone;
 
 /// Activate → the duel FREEZES to ask for a target (nothing destroyed yet) →
 /// supply the target → resume → the effect resolves and destroys the card.
@@ -29,10 +30,12 @@ fn activating_an_effect_freezes_for_a_target_then_resolves() {
     // Choose the monster as the target.
     lib.answer_target(vec![monster]);
 
-    // Resume: thaw → the stored resolve closure runs → the monster is destroyed.
+    // Resume: thaw → the stored resolve closure runs → the monster is destroyed
+    // (sent to the graveyard).
     assert_eq!(lib.resume(), DuelStatus::End);
-    assert!(
-        duel.borrow().get_card(monster).is_none(),
-        "after resolving, the targeted monster should be gone"
+    assert_eq!(
+        duel.borrow().zone_of(monster),
+        Some(Zone::GY),
+        "after resolving, the targeted monster should be in the graveyard"
     );
 }
