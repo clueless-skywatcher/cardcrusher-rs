@@ -1,0 +1,19 @@
+[package]
+name = "cardcrusher"
+version = "0.0.1"
+edition = "2021"
+description = "A Yu-Gi-Oh!-style rules engine in Rust (a from-scratch reimagining of ygopro-core)."
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+# Arena storage with generational keys: our "safe pointers" + free deleted-object tombstone.
+slotmap = "1"
+# The exact PRNG the reference engine uses — lets us byte-diff against ygopro-core.
+rand_xoshiro = "0.6"
+rand_core = "0.6"
+
+# The card DSL runtime (the Rhai spike — Phase 1, milestone 5).
+rhai = "1"
+
+[lib]
+name = "cardcrusher"
