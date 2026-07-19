@@ -51,6 +51,7 @@
 //! - [`duel`]      — the whole game; the box that owns every other room.
 
 pub mod card;
+pub mod constants;
 pub mod duel;
 pub mod effect;
 pub mod field;
@@ -60,6 +61,5 @@ pub mod processor;
 pub mod script;
 pub mod zone;
 
-/// The two players, by index — named for readability over bare `0` / `1`.
-pub const PLAYER_0: usize = 0;
-pub const PLAYER_1: usize = 1;
+// Re-exported so shared constants are reachable as `cardcrusher::PLAYER_0`, etc.
+pub use constants::*;

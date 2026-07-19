@@ -2,7 +2,8 @@
 //! acts on the answer.
 
 use cardcrusher::duel::Duel;
-use cardcrusher::processor::{DuelStatus, MSG_SELECT_IDLECMD};
+use cardcrusher::processor::DuelStatus;
+use cardcrusher::{CMD_NEXT_PHASE, CMD_SET_SPELL_TRAP, MSG_SELECT_IDLECMD};
 
 /// The idle command lists the options and FREEZES for a choice; answering
 /// "go to next phase" lets the turn move on.
@@ -15,8 +16,8 @@ fn the_menu_asks_then_advances_when_told_to_move_on() {
     assert_eq!(duel.process(), DuelStatus::Awaiting);
     assert_eq!(duel.messages(), [MSG_SELECT_IDLECMD], "it asked the menu");
 
-    // The player picks "go to next phase" (command 0).
-    duel.set_response(&[0]);
+    // The player picks "go to next phase".
+    duel.set_response(&[CMD_NEXT_PHASE]);
 
     // Resume → the menu is satisfied, stack drains.
     assert_eq!(duel.process(), DuelStatus::End);
@@ -31,8 +32,8 @@ fn a_non_advancing_command_reopens_the_menu() {
 
     assert_eq!(duel.process(), DuelStatus::Awaiting);
 
-    // Some action that isn't "next phase" → still in the Main Phase.
-    duel.set_response(&[9]);
+    // A non-advancing command (set spell/trap) keeps us in the Main Phase.
+    duel.set_response(&[CMD_SET_SPELL_TRAP]);
     assert_eq!(duel.process(), DuelStatus::Awaiting);
     assert_eq!(
         duel.messages(),
@@ -41,6 +42,6 @@ fn a_non_advancing_command_reopens_the_menu() {
     );
 
     // Finally, go to the next phase.
-    duel.set_response(&[0]);
+    duel.set_response(&[CMD_NEXT_PHASE]);
     assert_eq!(duel.process(), DuelStatus::End);
 }

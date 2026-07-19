@@ -4,7 +4,7 @@ use cardcrusher::card::Card;
 use cardcrusher::duel::Duel;
 use cardcrusher::processor::DuelStatus;
 use cardcrusher::zone::Zone;
-use cardcrusher::PLAYER_0;
+use cardcrusher::{CMD_SUMMON, PLAYER_0};
 
 /// Answering the menu with "summon the card at hand slot 0" puts that monster on
 /// the field, then reopens the menu (you're still in the Main Phase).
@@ -23,8 +23,8 @@ fn summoning_from_the_menu_puts_a_monster_on_the_field() {
     duel.idle_command();
     assert_eq!(duel.process(), DuelStatus::Awaiting);
 
-    // Answer: summon (command 1) the card at hand slot 0.
-    duel.set_response(&[1, 0]);
+    // Answer: summon the card at hand slot 0.
+    duel.set_response(&[CMD_SUMMON, 0]);
     assert_eq!(
         duel.process(),
         DuelStatus::Awaiting,

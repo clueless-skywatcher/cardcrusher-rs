@@ -17,7 +17,7 @@ fn normal_summon_moves_a_card_from_hand_to_the_field() {
     assert_eq!(duel.zone_of(monster), Some(Zone::Hand));
     assert_eq!(duel.hand_count(PLAYER_0), 1);
 
-    duel.summon(PLAYER_0, monster);
+    duel.summon(monster);
 
     assert_eq!(
         duel.zone_of(monster),

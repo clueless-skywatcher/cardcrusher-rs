@@ -1,7 +1,8 @@
 //! Talking to the player: freeze and resume.
 
 use cardcrusher::duel::Duel;
-use cardcrusher::processor::{DuelStatus, MSG_SELECT_CARD};
+use cardcrusher::processor::DuelStatus;
+use cardcrusher::MSG_SELECT_CARD;
 
 /// A task that needs an answer freezes the duel (`Awaiting`) after asking its
 /// question; once a response is supplied it resumes and finishes.
