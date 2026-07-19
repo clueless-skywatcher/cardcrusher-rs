@@ -32,9 +32,10 @@ use crate::ids::CardId;
 use crate::processor::{
     DuelMessage, DuelStatus, Processor, MSG_NEW_TURN, MSG_PHASE_BATTLE, MSG_PHASE_DRAW,
     MSG_PHASE_END, MSG_PHASE_MAIN1, MSG_PHASE_MAIN2, MSG_PHASE_STANDBY, MSG_SELECT_CARD,
-    MSG_STARTUP,
+    MSG_SELECT_IDLECMD, MSG_STARTUP,
 };
 use crate::zone::Zone;
+use crate::{PLAYER_0, PLAYER_1};
 
 // Roadmap — uncomment each import as the milestone that needs it lands:
 // use rand_core::SeedableRng;
@@ -57,8 +58,11 @@ pub struct Duel {
     responses: Vec<u8>,              // M4 inbox
     processor_stack: Vec<Processor>, // M3 to-do stack
     max_turns: usize,
-    turn_hist: Vec<u8>,
+    turn_hist: Vec<usize>,
     lps: [u32; 2],
+    decked_out: [bool; 2],
+    result: Option<Winner>,
+    win_reason: Option<WinReason>,
 }
 
 impl Default for Duel {
@@ -81,6 +85,9 @@ impl Duel {
             max_turns: 10000,
             turn_hist: vec![],
             lps: [8000, 8000],
+            decked_out: [false, false],
+            result: None,
+            win_reason: None,
         }
     }
 
@@ -103,9 +110,15 @@ impl Duel {
         id
     }
 
-    /// Draw the top card of a player's deck into their hand.
-    pub fn draw(&mut self, player: usize) -> Option<CardId> {
-        self.field.draw(player)
+    /// Draw `count` cards off the top of a player's deck into their hand. If the
+    /// deck can't supply them all, that player decks out (a loss).
+    pub fn draw(&mut self, player: usize, count: usize) -> Vec<CardId> {
+        let drawn = self.field.draw(player, count);
+        if drawn.len() < count {
+            self.decked_out[player] = true;
+        }
+        self.check_win();
+        drawn
     }
 
     pub fn deck_count(&self, player: usize) -> usize {
@@ -135,19 +148,27 @@ impl Duel {
 
     /// Run the top task once (the driver loop).
     pub fn step(&mut self) -> DuelStatus {
+        // End the match when there is a duel result
+        if self.result.is_some() {
+            return DuelStatus::End;
+        }
+
         // Pop the top task by value first — frees the stack borrow so `run_unit`
         // can push sub-tasks / emit messages through `&mut self`.
         let mut unit = match self.processor_stack.pop() {
             Some(unit) => unit,
             None => return DuelStatus::End, // nothing left → game over
         };
+        // Anything `run_unit` queues lands on top, at indices >= this depth.
+        let depth_before = self.processor_stack.len();
 
         if self.run_unit(&mut unit) {
             DuelStatus::Continue // finished: drop it (don't push back)
         } else {
-            // Paused: put it back (its step was already bumped).
+            // Paused: put it back — but BELOW any sub-tasks it just queued, so
+            // those children run first (before this task's next step).
             let is_freeze = unit.needs_answer();
-            self.processor_stack.push(unit);
+            self.processor_stack.insert(depth_before, unit);
             match is_freeze {
                 true => DuelStatus::Awaiting, // needs a human → freeze the duel (M4)
                 false => DuelStatus::Continue,
@@ -169,8 +190,10 @@ impl Duel {
                     }
                     // Last step: hand off to turn 1, then finish.
                     _ => {
-                        self.processor_stack
-                            .push(Processor::Turn { step: 0, player: 0 });
+                        self.processor_stack.push(Processor::Turn {
+                            step: 0,
+                            player: PLAYER_0,
+                        });
                         true
                     }
                 }
@@ -191,13 +214,27 @@ impl Duel {
 
                 let i = *step as usize;
                 self.messages.push(PHASES[i]);
+                if PHASES[i] == MSG_PHASE_MAIN1 || PHASES[i] == MSG_PHASE_MAIN2 {
+                    self.processor_stack.push(Processor::IdleCommand {
+                        step: 0,
+                        player: *player,
+                    });
+                    *step += 1;
+                    return false;
+                }
+
                 *step += 1;
                 if i + 1 == PHASES.len() {
-                    // Switch player
+                    // Hand over to the other player.
                     if self.turn_hist.len() < self.max_turns {
+                        let next = if *player == PLAYER_0 {
+                            PLAYER_1
+                        } else {
+                            PLAYER_0
+                        };
                         self.processor_stack.push(Processor::Turn {
                             step: 0,
-                            player: 1 - *player,
+                            player: next,
                         });
                     }
                     true
@@ -212,6 +249,37 @@ impl Duel {
                     false
                 }
                 _ => true,
+            },
+            Processor::IdleCommand { step, player } => match step {
+                // Step 0: offer the menu, then freeze for a choice.
+                0 => {
+                    *step += 1;
+                    self.messages.push(MSG_SELECT_IDLECMD);
+                    false
+                }
+                // Step 1+: act on the chosen command (read from the inbox).
+                // Response = [command, index]: 0 = next phase, 1 = summon.
+                _ => {
+                    let command = self.responses.first().copied().unwrap_or(0);
+                    match command {
+                        // Go to the next phase → the menu is done.
+                        0 => true,
+                        // Summon the card at hand slot `index`, then re-show the menu.
+                        1 => {
+                            let hand_slot = self.responses[1] as usize;
+                            if let Some(card) = self.field.hand_card(*player, hand_slot) {
+                                self.summon(*player, card);
+                            }
+                            self.messages.push(MSG_SELECT_IDLECMD);
+                            false
+                        }
+                        // Anything else keeps us in the Main Phase — re-show and wait.
+                        _ => {
+                            self.messages.push(MSG_SELECT_IDLECMD);
+                            false
+                        }
+                    }
+                }
             },
         }
     }
@@ -229,12 +297,12 @@ impl Duel {
         self.max_turns = turns
     }
 
-    pub fn turn_history(&self) -> &[u8] {
+    pub fn turn_history(&self) -> &[usize] {
         &self.turn_hist
     }
 
-    pub fn place(&mut self, card: CardId, zone: Zone) {
-        self.field.place(card, zone);
+    pub fn place(&mut self, player: usize, card: CardId, zone: Zone) {
+        self.field.place(player, card, zone);
     }
 
     pub fn zone_of(&self, card: CardId) -> Option<Zone> {
@@ -242,7 +310,7 @@ impl Duel {
     }
 
     pub fn send_to(&mut self, card: CardId, zone: Zone) {
-        self.field.place(card, zone);
+        self.field.send_to(card, zone);
     }
 
     pub fn life_points(&self, player: usize) -> u32 {
@@ -251,9 +319,74 @@ impl Duel {
 
     pub fn pay_lp(&mut self, player: usize, lp: u32) {
         self.lps[player] = self.lps[player].saturating_sub(lp);
+        self.check_win();
     }
 
     pub fn deal_damage(&mut self, player: usize, lp: u32) {
         self.lps[player] = self.lps[player].saturating_sub(lp);
+        self.check_win();
     }
+
+    /// Re-evaluate the win conditions from scratch:
+    /// a player at 0 LP or decked out has lost. Seeing BOTH players lets us tell a
+    /// single loss from a simultaneous draw.
+    fn check_win(&mut self) {
+        let p0_lost = self.lps[PLAYER_0] == 0 || self.decked_out[PLAYER_0];
+        let p1_lost = self.lps[PLAYER_1] == 0 || self.decked_out[PLAYER_1];
+
+        // A loser's reason: LP if their life is gone, otherwise deck-out.
+        let p0_reason = if self.lps[PLAYER_0] == 0 {
+            WinReason::LifePointsDepleted
+        } else {
+            WinReason::DeckOut
+        };
+        let p1_reason = if self.lps[PLAYER_1] == 0 {
+            WinReason::LifePointsDepleted
+        } else {
+            WinReason::DeckOut
+        };
+
+        (self.result, self.win_reason) = match (p0_lost, p1_lost) {
+            (true, true) => (Some(Winner::Draw), Some(p0_reason)),
+            (true, false) => (Some(Winner::Player(PLAYER_1)), Some(p0_reason)),
+            (false, true) => (Some(Winner::Player(PLAYER_0)), Some(p1_reason)),
+            (false, false) => (None, None),
+        };
+    }
+
+    pub fn idle_command(&mut self) {
+        self.processor_stack.push(Processor::IdleCommand {
+            step: 0,
+            player: PLAYER_0,
+        });
+    }
+
+    pub fn summon(&mut self, player: usize, card: CardId) {
+        if !self.field.contains(player, card, Zone::Hand) {
+            // We should not reach this part of the code
+            panic!("Invalid card to choose")
+        }
+        self.field.send_to(card, Zone::MonsterZone);
+    }
+
+    pub fn result(&self) -> Option<Winner> {
+        self.result
+    }
+
+    pub fn win_reason(&self) -> Option<WinReason> {
+        self.win_reason
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Winner {
+    Player(usize),
+    Draw,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WinReason {
+    LifePointsDepleted,
+    DeckOut,
+    Exodia,
 }

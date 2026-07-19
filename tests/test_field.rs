@@ -3,6 +3,7 @@
 use cardcrusher::card::Card;
 use cardcrusher::duel::Duel;
 use cardcrusher::zone::Zone;
+use cardcrusher::PLAYER_0;
 
 /// A card reports the zone it was placed in; an unplaced card reports none; and
 /// placing it again moves it.
@@ -15,11 +16,11 @@ fn a_card_reports_the_zone_it_lives_in() {
     assert_eq!(duel.zone_of(c), None);
 
     // Place it in a hand → it reports that zone.
-    duel.place(c, Zone::Hand);
+    duel.place(PLAYER_0, c, Zone::Hand);
     assert_eq!(duel.zone_of(c), Some(Zone::Hand));
 
     // Placing again moves it.
-    duel.place(c, Zone::MonsterZone);
+    duel.place(PLAYER_0, c, Zone::MonsterZone);
     assert_eq!(duel.zone_of(c), Some(Zone::MonsterZone));
 }
 
@@ -38,8 +39,8 @@ fn cards_have_independent_zones() {
     let a = duel.add_card(Card);
     let b = duel.add_card(Card);
 
-    duel.place(a, Zone::Hand);
-    duel.place(b, Zone::GY);
+    duel.place(PLAYER_0, a, Zone::Hand);
+    duel.place(PLAYER_0, b, Zone::GY);
 
     assert_eq!(duel.zone_of(a), Some(Zone::Hand));
     assert_eq!(duel.zone_of(b), Some(Zone::GY));

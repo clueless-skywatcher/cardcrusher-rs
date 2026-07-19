@@ -29,8 +29,9 @@ pub type DuelMessage = u8;
 #[derive(Debug)]
 pub enum Processor {
     Startup { step: Step },
-    Turn { step: Step, player: u8 },
+    Turn { step: Step, player: usize },
     SelectCard { step: Step },
+    IdleCommand { step: Step, player: usize },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -53,12 +54,15 @@ pub const MSG_PHASE_BATTLE: DuelMessage = 13;
 pub const MSG_PHASE_MAIN2: DuelMessage = 14;
 pub const MSG_PHASE_END: DuelMessage = 15;
 
+pub const MSG_SELECT_IDLECMD: DuelMessage = 16;
+
 impl Processor {
     /// Does pausing on this task mean we must stop and ask a human?
     pub fn needs_answer(&self) -> bool {
         match self {
             Processor::Startup { .. } | Processor::Turn { .. } => false,
             Processor::SelectCard { .. } => true,
+            Processor::IdleCommand { .. } => true,
         }
     }
 }
