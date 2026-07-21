@@ -1,11 +1,11 @@
 //! The card DSL runtime (Rhai). A card is a script; loading it registers effects,
-//! each carrying a `resolve` closure the engine runs later.
+//! each carrying `cost` and `resolve` closures the engine runs later.
 //!
-//! Key constraint: the [`crate::duel::Duel`] now OWNS the Rhai engine, so the
+//! Key constraint: the [`crate::duel::Duel`] OWNS the Rhai engine, so the
 //! registered functions must NOT capture the `Duel` — that would be a reference
 //! cycle, and re-borrowing the duel mid-call would panic. Instead they RECORD
 //! what the effect wants into a shared [`EffectContext`]; the `Duel` reads that
-//! and applies the changes *after* the script runs.
+//! and applies the changes *after* running the script.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -13,22 +13,27 @@ use rhai::{Dynamic, Engine, FnPtr, Map};
 
 use crate::ids::CardId;
 
-/// One effect described by a card.
+/// One effect described by a card. `cost` and `resolve` are closures run later —
+/// each records intents into the shared [`EffectContext`].
 pub struct EffectDef {
     /// Did the card specify a `target`? Decides whether activation asks for one.
     pub has_target: bool,
-    /// The `resolve` closure — run later to carry out the effect.
+    /// The `cost` closure (e.g. `|| { PayLP(500); }`), if any — run at activation.
+    pub cost: Option<FnPtr>,
+    /// The `resolve` closure — run when the effect resolves.
     pub resolve: FnPtr,
 }
 
-/// Scratchpad the registered DSL functions write into while a `resolve` runs.
-/// The `Duel` sets `targets`, runs the script, then applies `to_destroy`.
+/// Scratchpad the registered DSL functions write into while a `cost`/`resolve`
+/// runs. The `Duel` sets `targets`, runs the closure, then applies the records.
 #[derive(Default)]
 pub struct EffectContext {
     /// The chosen targets for the effect currently resolving.
     pub targets: Vec<CardId>,
     /// Cards the script asked to destroy (applied by the `Duel` afterward).
     pub to_destroy: Vec<CardId>,
+    /// Life points the script asked to pay (applied by the `Duel` afterward).
+    pub lp_to_pay: u32,
     /// Spike observable: how many times `Destroy` was called.
     pub destroys: usize,
 }
@@ -44,15 +49,16 @@ pub fn build_engine(
     // `RegisterActivate(#{...})`: store an effect from the card's description.
     engine.register_fn("RegisterActivate", move |map: Map| {
         let resolve = map.get("resolve").unwrap().clone().cast::<FnPtr>();
+        let cost = map.get("cost").map(|c| c.clone().cast::<FnPtr>());
         let has_target = map.contains_key("target");
         effects.borrow_mut().push(EffectDef {
             has_target,
+            cost,
             resolve,
         });
     });
 
-    // `Destroy(what)`: record that the current targets should be destroyed. The
-    // Duel applies this after the script returns — no duel access here.
+    // `Destroy(what)`: record that the current targets should be destroyed.
     let ctx_destroy = ctx.clone();
     engine.register_fn("Destroy", move |_what: Dynamic| {
         let mut c = ctx_destroy.borrow_mut();
@@ -61,8 +67,13 @@ pub fn build_engine(
         c.destroys += 1;
     });
 
+    // `PayLP(n)`: record that `n` life points should be paid.
+    let ctx_pay = ctx.clone();
+    engine.register_fn("PayLP", move |n: i64| {
+        ctx_pay.borrow_mut().lp_to_pay += n as u32;
+    });
+
     // Placeholders — exist so cards parse; real meaning later.
-    engine.register_fn("PayLP", |_n: i64| Dynamic::UNIT);
     engine.register_fn("Choose", |_a: Dynamic, _b: Dynamic| Dynamic::UNIT);
     engine.register_fn("Monsters", |_a: Dynamic| Dynamic::UNIT);
     engine.register_fn("Exactly", |_n: i64| Dynamic::UNIT);

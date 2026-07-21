@@ -10,8 +10,8 @@
 
 fn Example() {
     RegisterActivate(#{
-        cost:    PayLP(500),
-        target:  Choose(Monsters(Opponent()), Exactly(1)),
+        cost:    || { PayLP(500) },
+        target:  Choose(GetMonsters(Opponent(), MonsterZone), Exactly(1)),
         resolve: || { Destroy(GetTargets()); }
     });
 }

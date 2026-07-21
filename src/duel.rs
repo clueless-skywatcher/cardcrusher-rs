@@ -288,6 +288,21 @@ impl Duel {
         }
     }
 
+    /// Run an effect's `cost` closure (if any) and apply what it recorded. Like
+    /// `resolve`, the closure records into `effect_ctx`; we apply after.
+    fn pay_cost(&mut self, index: usize, player: usize) {
+        let cost = self.effects.borrow()[index].cost.clone();
+        if let Some(cost) = cost {
+            let ast = self.ast.as_ref().expect("a card must be loaded first");
+            cost.call::<()>(&self.engine, ast, ()).unwrap();
+        }
+        let amount = self.effect_ctx.borrow().lp_to_pay;
+        self.effect_ctx.borrow_mut().lp_to_pay = 0;
+        if amount > 0 {
+            self.pay_lp(player, amount);
+        }
+    }
+
     // ===== Player I/O =======================================================
 
     pub fn messages(&self) -> &[DuelMessage] {
@@ -477,12 +492,43 @@ impl Duel {
                             self.messages.push(MSG_SELECT_IDLECMD);
                             false
                         }
+                        CMD_ACTIVATE => {
+                            let effect = self.responses.get(1).copied().unwrap_or(0) as usize;
+                            self.processor_stack.push(Processor::Activate {
+                                step: 0,
+                                effect,
+                                player: *player,
+                            });
+                            true
+                        }
                         // Anything else keeps us in the Main Phase — re-show.
                         _ => {
                             self.messages.push(MSG_SELECT_IDLECMD);
                             false
                         }
                     }
+                }
+            },
+            Processor::Activate {
+                step,
+                effect,
+                player,
+            } => match step {
+                0 => {
+                    // Cost is paid when the activation is declared.
+                    self.pay_cost(*effect, *player);
+                    if self.effects.borrow()[*effect].has_target {
+                        self.processor_stack.push(Processor::SelectCard { step: 0 });
+                        *step += 1;
+                        false
+                    } else {
+                        self.resolve(*effect);
+                        true
+                    }
+                }
+                _ => {
+                    self.resolve(*effect);
+                    true
                 }
             },
         }

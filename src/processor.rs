@@ -27,10 +27,25 @@ pub type Step = u16;
 
 #[derive(Debug)]
 pub enum Processor {
-    Startup { step: Step },
-    Turn { step: Step, player: usize },
-    SelectCard { step: Step },
-    IdleCommand { step: Step, player: usize },
+    Startup {
+        step: Step,
+    },
+    Turn {
+        step: Step,
+        player: usize,
+    },
+    SelectCard {
+        step: Step,
+    },
+    IdleCommand {
+        step: Step,
+        player: usize,
+    },
+    Activate {
+        step: Step,
+        effect: usize,
+        player: usize,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -47,6 +62,7 @@ impl Processor {
             Processor::Startup { .. } | Processor::Turn { .. } => false,
             Processor::SelectCard { .. } => true,
             Processor::IdleCommand { .. } => true,
+            Processor::Activate { .. } => false, // Activate doesn't need an answer, but in case of targets, the underlying SelectCard does
         }
     }
 }
