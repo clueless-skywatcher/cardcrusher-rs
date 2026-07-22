@@ -12,8 +12,12 @@ slotmap = "1"
 rand_xoshiro = "0.6"
 rand_core = "0.6"
 
-# The card DSL runtime (the Rhai spike — Phase 1, milestone 5).
-rhai = "1"
+# The card DSL runtime. Lua, embedded via `mlua`. We build Lua from source
+# (`vendored`) so there's no system-Lua dependency and every build is identical.
+# Lua's coroutines are why we picked it: a card's `resolve`/`target` can pause
+# mid-run to ask the player something, then resume — no interpreter can do that
+# without real coroutines.
+mlua = { version = "0.12", features = ["lua54", "vendored"] }
 
 [lib]
 name = "cardcrusher"

@@ -17,7 +17,7 @@
 //! ```
 //!
 //! **Why this matters:** the IR is the engine's *permanent* contract. The card
-//! language on top (Rhai now, maybe a custom one later) is just a friendly way to
+//! language on top (Lua now, maybe a custom one later) is just a friendly way to
 //! emit this IR — so we can swap the language without touching the engine.
 #[derive(Debug, Default)]
 pub struct Effect;
