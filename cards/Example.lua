@@ -8,16 +8,16 @@ Example = Card:new(12345678) -- Register a card with the ID 12345678
 
 local activate = Example:add_effect()
 
-function activate:cost(e)
-    e:pay_lp(500) -- Pay LP
+function activate:cost(effect)
+    effect:pay_lp(500) -- Pay LP
 end
 
-function activate:target(e)
+function activate:target(effect)
     -- Choose exactly one monster in the opponent's monster zone
-    e:prompt_selection(e:monster_zone(OPPONENT), 1)
+    effect:prompt_selection(e:monster_zone(OPPONENT), 1)
 end
 
-function activate:resolve(e)
-    -- Destroy the targets chosen in target(e)
-    e:destroy(e:targets())
+function activate:resolve(effect)
+    -- Destroy the targets chosen in target(effect)
+    effect:destroy(effect:targets())
 end
