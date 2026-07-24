@@ -1,0 +1,9 @@
+{
+    "Lua.diagnostics.disable": [
+        "duplicate-set-field",
+        "undefined-global"
+    ],
+    "Lua.diagnostics.globals": [
+        "YOU"
+    ]
+}
