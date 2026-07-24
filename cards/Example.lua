@@ -14,7 +14,7 @@ end
 
 function activate:target(effect)
     -- Choose exactly one monster in the opponent's monster zone
-    effect:prompt_selection(e:monster_zone(OPPONENT), 1)
+    effect:prompt_selection(effect:monster_zone(OPPONENT), 1)
 end
 
 function activate:resolve(effect)

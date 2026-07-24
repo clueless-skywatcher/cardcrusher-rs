@@ -10,6 +10,26 @@ function Effect:cost(e)      end              -- free by default
 function Effect:target(e)    end              -- no target by default
 function Effect:resolve(e)   end              -- does nothing by default
 
+-- Effect verbs: thin wrappers over the engine's Rust hooks. They read/write the
+-- shared effect context, so what a stage does is applied to the real duel.
+function Effect:targets()     return effect_targets() end
+function Effect:destroy(cards) effect_destroy(cards) end
+function Effect:pay_lp(n)      effect_pay_lp(n) end
+
+-- Ask the host to choose `count` cards from `candidates`. This PAUSES the whole
+-- duel (coroutine.yield) until the host answers; the engine records the chosen
+-- targets before resuming. Because it's plain Lua, the stage suspends linearly.
+function Effect:prompt_selection(candidates, count)
+    return coroutine.yield(count)
+end
+
+-- (stub) the monsters a player controls — real field query lands in M5.
+function Effect:monster_zone(who) return {} end
+
+-- Player references, relative to the activating player (refined in M5).
+YOU = 0
+OPPONENT = 1
+
 -- Base class for cards.
 Card = {}
 Card.__index = Card

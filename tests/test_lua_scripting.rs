@@ -9,6 +9,7 @@
 
 use cardcrusher::card::Card;
 use cardcrusher::duel::Duel;
+use cardcrusher::processor::DuelStatus;
 use cardcrusher::zone::Zone;
 use cardcrusher::{PLAYER_0, PLAYER_1};
 
@@ -73,5 +74,38 @@ fn paying_an_effects_cost_deducts_lp_from_the_activating_player() {
         duel.life_points(PLAYER_1),
         8000,
         "the opponent's life points are untouched"
+    );
+}
+
+/// M4: the coroutine bridge. Activating runs the `target` stage, which calls
+/// `e:prompt_selection(...)` — that YIELDS, freezing the duel (nothing destroyed
+/// yet). We answer with the chosen card, resume, and the effect resolves and
+/// destroys it. This is the whole reason for Lua: a stage pauses linearly.
+#[test]
+fn activating_freezes_for_a_selection_then_resolves() {
+    let mut duel = Duel::new();
+    let foe = duel.add_card(Card);
+    duel.load_card("cards/Example.lua")
+        .expect("Example.lua should load");
+
+    // Activate effect 0 as player 0. Its target prompts a selection → freeze.
+    assert_eq!(
+        duel.activate(0, PLAYER_0),
+        DuelStatus::Awaiting,
+        "the target stage should yield and freeze the duel"
+    );
+    assert_ne!(
+        duel.zone_of(foe),
+        Some(Zone::GY),
+        "nothing is destroyed while we're still choosing"
+    );
+
+    // Answer with the chosen card, resume → target finishes → resolve → destroy.
+    duel.answer_selection(vec![foe]);
+    assert_eq!(duel.resume(), DuelStatus::End);
+    assert_eq!(
+        duel.zone_of(foe),
+        Some(Zone::GY),
+        "the chosen monster is destroyed after resuming"
     );
 }
