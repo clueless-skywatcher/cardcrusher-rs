@@ -7,7 +7,7 @@
 //!
 //! (Unifying these fully — a per-player pile for every zone — is a later cleanup.)
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, vec};
 
 use crate::{ids::CardId, zone::Zone};
 
@@ -107,5 +107,15 @@ impl Field {
     /// owner — works for every zone.
     pub fn contains(&self, player: usize, card: CardId, zone: Zone) -> bool {
         self.locations.get(&card) == Some(&(player, zone))
+    }
+
+    /// The cards `player` controls in their Monster Zone, in id order
+    /// (`locations` is a `BTreeMap`, so iteration is deterministic).
+    pub fn monster_zone(&self, player: usize) -> Vec<CardId> {
+        self.locations
+            .iter()
+            .filter(|(_, &(pl, zone))| pl == player && zone == Zone::MonsterZone)
+            .map(|(&card, _)| card)
+            .collect()
     }
 }

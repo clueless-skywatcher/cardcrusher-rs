@@ -15,7 +15,7 @@ use std::rc::Rc;
 use mlua::Lua;
 use slotmap::{Key, KeyData};
 
-use crate::ids::CardId;
+use crate::{field::Field, ids::CardId};
 
 /// Scratchpad shared between the `Duel` and the effect currently resolving.
 /// Verbs on `e` write here; the `Duel` reads it back.
@@ -27,18 +27,21 @@ pub struct EffectContext {
     pub to_destroy: Vec<CardId>,
     /// Life points the script asked to pay (applied by the `Duel` afterward).
     pub lp_payment: u32,
+    pub activator: usize,
+    pub candidates: Vec<CardId>,
 }
 
 /// Register the effect verbs as VM globals the prelude's `Effect` methods call.
 /// Each captures the shared context, so a stage's verbs read/write what the
 /// `Duel` sees. One VM per `Duel`, so each hook is bound to that duel's context.
-pub fn register_verbs(lua: &Lua, ctx: Rc<RefCell<EffectContext>>) -> mlua::Result<()> {
+pub fn register_verbs(
+    lua: &Lua,
+    ctx: Rc<RefCell<EffectContext>>,
+    field: Rc<RefCell<Field>>,
+) -> mlua::Result<()> {
     // e:targets() -> the chosen targets (card ids, encoded for Lua).
     let c = ctx.clone();
-    let targets = lua.create_function(move |_, ()| {
-        let ids: Vec<i64> = c.borrow().targets.iter().map(|id| encode(*id)).collect();
-        Ok(ids)
-    })?;
+    let targets = lua.create_function(move |_, ()| Ok(encode_ids(&c.borrow().targets)))?;
     lua.globals().set("effect_targets", targets)?;
 
     // e:destroy(list) -> record those cards to be sent to the GY.
@@ -52,12 +55,30 @@ pub fn register_verbs(lua: &Lua, ctx: Rc<RefCell<EffectContext>>) -> mlua::Resul
     lua.globals().set("effect_destroy", destroy)?;
 
     // e:pay_lp(n) -> record n life points to pay.
-    let c = ctx;
+    let c = ctx.clone();
     let pay_lp = lua.create_function(move |_, n: u32| {
         c.borrow_mut().lp_payment += n;
         Ok(())
     })?;
     lua.globals().set("effect_pay_lp", pay_lp)?;
+
+    // e:prompt_selection records its candidate set here — for mapping the picked
+    // index back to a card, and for the "no legal target" check.
+    let c = ctx.clone();
+    let offer = lua.create_function(move |_, ids: Vec<i64>| {
+        c.borrow_mut().candidates = ids.into_iter().map(decode).collect();
+        Ok(())
+    })?;
+    lua.globals().set("effect_offer", offer)?;
+
+    // e:monster_zone(who) -> the monsters `who` controls; `who` is relative to
+    // the activating player (YOU = same, OPPONENT = the other).
+    let c = ctx.clone();
+    let monster_zone = lua.create_function(move |_, who: usize| {
+        let actual = (who + c.borrow().activator) % 2;
+        Ok(encode_ids(&field.borrow().monster_zone(actual)))
+    })?;
+    lua.globals().set("effect_monster_zone", monster_zone)?;
 
     Ok(())
 }
@@ -69,4 +90,10 @@ fn encode(id: CardId) -> i64 {
 }
 fn decode(n: i64) -> CardId {
     CardId::from(KeyData::from_ffi(n as u64))
+}
+
+/// Encode a slice of card ids into the list Lua sees (e.g. what `e:targets()`
+/// returns and what a resumed `prompt_selection` hands back).
+pub(crate) fn encode_ids(ids: &[CardId]) -> Vec<i64> {
+    ids.iter().map(|id| encode(*id)).collect()
 }

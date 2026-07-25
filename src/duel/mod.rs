@@ -19,7 +19,7 @@ mod scripting;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mlua::{Lua, Table};
+use mlua::{Lua, Table, Thread};
 use slotmap::SlotMap;
 
 use crate::card::Card;
@@ -59,6 +59,8 @@ pub struct Duel {
     /// the `register_effect` hook that the prelude's `add_effect` calls.
     effects: Rc<RefCell<Vec<Table>>>,
     effect_ctx: Rc<RefCell<EffectContext>>,
+
+    pending: Option<(Thread, usize)>,
 }
 
 impl Default for Duel {
@@ -78,7 +80,7 @@ impl Duel {
         let vm = Lua::new();
         vm.gc_stop(); // determinism: no nondeterministic GC pauses
 
-        Self::set_globals(&vm, effects.clone(), effect_ctx.clone())
+        Self::set_globals(&vm, effects.clone(), effect_ctx.clone(), field.clone())
             .expect("failed to set up Lua globals");
 
         let mut duel = Duel {
@@ -96,6 +98,7 @@ impl Duel {
             vm,
             effects,
             effect_ctx,
+            pending: None,
         };
         duel.load_prelude();
         duel
@@ -108,13 +111,14 @@ impl Duel {
         vm: &Lua,
         effects: Rc<RefCell<Vec<Table>>>,
         effect_ctx: Rc<RefCell<EffectContext>>,
+        field: Rc<RefCell<Field>>,
     ) -> mlua::Result<()> {
         let hook = vm.create_function(move |_, eff: Table| {
             effects.borrow_mut().push(eff);
             Ok(())
         })?;
         vm.globals().set("register_effect", hook)?;
-        crate::effect::register_verbs(vm, effect_ctx)?;
+        crate::effect::register_verbs(vm, effect_ctx, field)?;
         Ok(())
     }
 

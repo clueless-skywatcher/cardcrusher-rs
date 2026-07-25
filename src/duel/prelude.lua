@@ -17,16 +17,18 @@ function Effect:destroy(cards) effect_destroy(cards) end
 function Effect:pay_lp(n)      effect_pay_lp(n) end
 
 -- Ask the host to choose `count` cards from `candidates`. This PAUSES the whole
--- duel (coroutine.yield) until the host answers; the engine records the chosen
--- targets before resuming. Because it's plain Lua, the stage suspends linearly.
+-- duel (coroutine.yield) until the host answers; the engine records the candidate
+-- set (so it can reject an empty one and map the picked index back to a card).
+-- Because it's plain Lua, the stage suspends linearly.
 function Effect:prompt_selection(candidates, count)
+    effect_offer(candidates)
     return coroutine.yield(count)
 end
 
--- (stub) the monsters a player controls — real field query lands in M5.
-function Effect:monster_zone(who) return {} end
+-- The monsters a player controls (`who` relative to the activating player).
+function Effect:monster_zone(who) return effect_monster_zone(who) end
 
--- Player references, relative to the activating player (refined in M5).
+-- Player references, relative to the activating player.
 YOU = 0
 OPPONENT = 1
 

@@ -46,7 +46,7 @@ fn resolving_an_effect_destroys_its_target() {
 
     // Give effect 0 its target, then resolve it.
     duel.set_targets(vec![monster]);
-    duel.resolve_effect(0);
+    duel.resolve_effect(0).expect("resolve should run");
 
     assert_eq!(
         duel.zone_of(monster),
@@ -63,7 +63,7 @@ fn paying_an_effects_cost_deducts_lp_from_the_activating_player() {
     duel.load_card("cards/Example.lua")
         .expect("Example.lua should load");
 
-    duel.pay_cost(0, PLAYER_0);
+    duel.pay_cost(0, PLAYER_0).expect("cost should be paid");
 
     assert_eq!(
         duel.life_points(PLAYER_0),
@@ -77,35 +77,89 @@ fn paying_an_effects_cost_deducts_lp_from_the_activating_player() {
     );
 }
 
-/// M4: the coroutine bridge. Activating runs the `target` stage, which calls
-/// `e:prompt_selection(...)` — that YIELDS, freezing the duel (nothing destroyed
-/// yet). We answer with the chosen card, resume, and the effect resolves and
-/// destroys it. This is the whole reason for Lua: a stage pauses linearly.
+/// M4 + M5: activating runs the `target` stage, which asks for a selection from
+/// a real candidate set (the opponent's monsters). That YIELDS, freezing the
+/// duel — the cost is paid, but nothing is destroyed yet. We pick a candidate
+/// by index, resume, and the effect resolves and destroys it.
 #[test]
-fn activating_freezes_for_a_selection_then_resolves() {
+fn activating_targets_and_destroys_an_opponent_monster() {
     let mut duel = Duel::new();
     let foe = duel.add_card(Card);
+    duel.place(PLAYER_1, foe, Zone::MonsterZone);
     duel.load_card("cards/Example.lua")
         .expect("Example.lua should load");
 
-    // Activate effect 0 as player 0. Its target prompts a selection → freeze.
+    // Activate as player 0: cost paid, then the duel freezes for the pick.
     assert_eq!(
-        duel.activate(0, PLAYER_0),
+        duel.activate(0, PLAYER_0).expect("activate should run"),
         DuelStatus::Awaiting,
         "the target stage should yield and freeze the duel"
     );
-    assert_ne!(
+    assert_eq!(
+        duel.life_points(PLAYER_0),
+        7500,
+        "cost is paid before the pick"
+    );
+    assert_eq!(
         duel.zone_of(foe),
-        Some(Zone::GY),
+        Some(Zone::MonsterZone),
         "nothing is destroyed while we're still choosing"
     );
 
-    // Answer with the chosen card, resume → target finishes → resolve → destroy.
-    duel.answer_selection(vec![foe]);
-    assert_eq!(duel.resume(), DuelStatus::End);
+    // Pick candidate index 0 (the opponent's only monster) → resolve → destroy.
+    duel.answer_selection(vec![0]);
+    assert_eq!(duel.resume().expect("resume should run"), DuelStatus::End);
     assert_eq!(
         duel.zone_of(foe),
         Some(Zone::GY),
         "the chosen monster is destroyed after resuming"
+    );
+}
+
+/// M5: `OPPONENT` is relative. The same card, activated by player 1, targets
+/// player 0's monster.
+#[test]
+fn opponent_is_relative_to_the_activating_player() {
+    let mut duel = Duel::new();
+    let mine = duel.add_card(Card);
+    duel.place(PLAYER_0, mine, Zone::MonsterZone);
+    duel.load_card("cards/Example.lua")
+        .expect("Example.lua should load");
+
+    // Player 1 activates → their opponent is player 0 → only candidate is `mine`.
+    assert_eq!(
+        duel.activate(0, PLAYER_1).expect("activate should run"),
+        DuelStatus::Awaiting
+    );
+    duel.answer_selection(vec![0]);
+    duel.resume().expect("resume should run");
+
+    assert_eq!(
+        duel.zone_of(mine),
+        Some(Zone::GY),
+        "player 1's opponent is player 0"
+    );
+}
+
+/// M5: no legal target → the activation is rejected up front. The candidate set
+/// is empty, so the duel does not freeze and the cost is NOT paid.
+#[test]
+fn cannot_activate_with_no_legal_target() {
+    let mut duel = Duel::new();
+    // No monsters on the field — nothing to target.
+    duel.load_card("cards/Example.lua")
+        .expect("Example.lua should load");
+
+    let status = duel.activate(0, PLAYER_0).expect("activate should run");
+
+    assert_ne!(
+        status,
+        DuelStatus::Awaiting,
+        "no legal target → must not freeze"
+    );
+    assert_eq!(
+        duel.life_points(PLAYER_0),
+        8000,
+        "no legal target → the cost is not paid"
     );
 }
