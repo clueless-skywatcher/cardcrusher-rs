@@ -136,8 +136,8 @@ resolves end-to-end.
 | M | Behaviour | Status |
 |---|-----------|:---:|
 | 1 | load a card → 1 effect registered | ✅ |
-| 2 | resolve → target to GY | ✅ |
-| 3 | activate → cost paid | ✅ |
-| 4 | freeze at selection → resume → destroy | ✅ |
-| 5 | candidate set, relative players, no-target reject | ✅ |
+| 2 | resolve → target to GY | ⬜ |
+| 3 | activate → cost paid | ⬜ |
+| 4 | freeze at selection → resume → destroy | ⬜ |
+| 5 | candidate set, relative players, no-target reject | ⬜ |
 | 6 | activate from the menu | ⬜ |
