@@ -15,7 +15,7 @@ fn setting_a_spell_trap_from_the_menu() {
     let mut duel = Duel::new();
 
     // Player 0 has a card in hand.
-    duel.add_to_deck(PLAYER_0, Card);
+    duel.add_to_deck(PLAYER_0, Card::new(0));
     let card = duel.draw(PLAYER_0, 1)[0];
     assert_eq!(duel.zone_of(card), Some(Zone::Hand));
 

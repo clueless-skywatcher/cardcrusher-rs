@@ -15,7 +15,7 @@ fn summoning_from_the_menu_puts_a_monster_on_the_field() {
     let mut duel = Duel::new();
 
     // Player 0 has one monster in hand.
-    duel.add_to_deck(PLAYER_0, Card);
+    duel.add_to_deck(PLAYER_0, Card::new(0));
     let monster = duel.draw(PLAYER_0, 1)[0];
     assert_eq!(duel.zone_of(monster), Some(Zone::Hand));
 

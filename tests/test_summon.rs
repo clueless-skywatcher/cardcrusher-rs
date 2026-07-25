@@ -12,7 +12,7 @@ fn normal_summon_moves_a_card_from_hand_to_the_field() {
     let mut duel = Duel::new();
 
     // Give player 0 a card in hand (draw it off the deck).
-    duel.add_to_deck(PLAYER_0, Card);
+    duel.add_to_deck(PLAYER_0, Card::new(0));
     let monster = duel.draw(PLAYER_0, 1)[0];
     assert_eq!(duel.zone_of(monster), Some(Zone::Hand));
     assert_eq!(duel.hand_count(PLAYER_0), 1);

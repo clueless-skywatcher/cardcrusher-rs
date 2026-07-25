@@ -25,10 +25,19 @@ pub struct EffectContext {
     pub targets: Vec<CardId>,
     /// Cards the script asked to destroy (applied by the `Duel` afterward).
     pub to_destroy: Vec<CardId>,
-    /// Life points the script asked to pay (applied by the `Duel` afterward).
-    pub lp_payment: u32,
+    /// Costs the script declared in its `cost` stage. The `Duel` checks they're
+    /// all payable, then applies them ("describe, then execute").
+    pub costs: Vec<CostType>,
     pub activator: usize,
     pub candidates: Vec<CardId>,
+}
+
+/// A cost an effect declares in its `cost` stage. New cost kinds get a variant
+/// here plus arms in the duel's `can_pay` / `apply_cost`.
+#[derive(Debug, Clone)]
+pub enum CostType {
+    /// Pay N life points.
+    LifePoints(u32),
 }
 
 /// Register the effect verbs as VM globals the prelude's `Effect` methods call.
@@ -54,10 +63,10 @@ pub fn register_verbs(
     })?;
     lua.globals().set("effect_destroy", destroy)?;
 
-    // e:pay_lp(n) -> record n life points to pay.
+    // e:pay_lp(n) -> declare a "pay n life points" cost.
     let c = ctx.clone();
     let pay_lp = lua.create_function(move |_, n: u32| {
-        c.borrow_mut().lp_payment += n;
+        c.borrow_mut().costs.push(CostType::LifePoints(n));
         Ok(())
     })?;
     lua.globals().set("effect_pay_lp", pay_lp)?;

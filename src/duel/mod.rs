@@ -57,7 +57,7 @@ pub struct Duel {
     vm: Lua,
     /// Every effect a loaded card registered, as a Lua object handle. Filled by
     /// the `register_effect` hook that the prelude's `add_effect` calls.
-    effects: Rc<RefCell<Vec<Table>>>,
+    effects: Rc<RefCell<Vec<(u32, Table)>>>,
     effect_ctx: Rc<RefCell<EffectContext>>,
 
     pending: Option<(Thread, usize)>,
@@ -109,15 +109,15 @@ impl Duel {
     /// (`e:destroy`/`pay_lp`/`targets`, wired to the shared context).
     fn set_globals(
         vm: &Lua,
-        effects: Rc<RefCell<Vec<Table>>>,
+        effects: Rc<RefCell<Vec<(u32, Table)>>>,
         effect_ctx: Rc<RefCell<EffectContext>>,
         field: Rc<RefCell<Field>>,
     ) -> mlua::Result<()> {
-        let hook = vm.create_function(move |_, eff: Table| {
-            effects.borrow_mut().push(eff);
+        let register_effect = vm.create_function(move |_, args: (u32, Table)| {
+            effects.borrow_mut().push((args.0, args.1));
             Ok(())
         })?;
-        vm.globals().set("register_effect", hook)?;
+        vm.globals().set("register_effect", register_effect)?;
         crate::effect::register_verbs(vm, effect_ctx, field)?;
         Ok(())
     }

@@ -9,7 +9,7 @@ use cardcrusher::PLAYER_0;
 #[test]
 fn send_to_moves_a_card_and_keeps_it_alive() {
     let mut duel = Duel::new();
-    let c = duel.add_card(Card);
+    let c = duel.add_card(Card::new(0));
     duel.place(PLAYER_0, c, Zone::MonsterZone);
 
     duel.send_to(c, Zone::GY);
@@ -22,7 +22,7 @@ fn send_to_moves_a_card_and_keeps_it_alive() {
 #[test]
 fn send_to_places_an_unzoned_card() {
     let mut duel = Duel::new();
-    let c = duel.add_card(Card);
+    let c = duel.add_card(Card::new(0));
 
     duel.send_to(c, Zone::Hand);
 

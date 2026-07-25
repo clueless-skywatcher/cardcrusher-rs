@@ -13,4 +13,12 @@
 //! materials:   Vec<CardId>      // "my Xyz materials" — a list of tickets
 //! ```
 #[derive(Debug, Default)]
-pub struct Card;
+pub struct Card {
+    pub code: u32,
+}
+
+impl Card {
+    pub fn new(code: u32) -> Self {
+        Card { code }
+    }
+}

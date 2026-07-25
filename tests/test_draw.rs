@@ -9,8 +9,8 @@ use cardcrusher::{PLAYER_0, PLAYER_1};
 #[test]
 fn drawing_moves_a_card_from_deck_to_hand() {
     let mut duel = Duel::new();
-    duel.add_to_deck(PLAYER_0, Card);
-    duel.add_to_deck(PLAYER_0, Card);
+    duel.add_to_deck(PLAYER_0, Card::new(0));
+    duel.add_to_deck(PLAYER_0, Card::new(0));
 
     assert_eq!(duel.deck_count(PLAYER_0), 2);
     assert_eq!(duel.hand_count(PLAYER_0), 0);
@@ -26,8 +26,8 @@ fn drawing_moves_a_card_from_deck_to_hand() {
 #[test]
 fn drawing_only_affects_the_drawing_player() {
     let mut duel = Duel::new();
-    duel.add_to_deck(PLAYER_0, Card);
-    duel.add_to_deck(PLAYER_1, Card);
+    duel.add_to_deck(PLAYER_0, Card::new(0));
+    duel.add_to_deck(PLAYER_1, Card::new(0));
 
     duel.draw(PLAYER_0, 1);
 

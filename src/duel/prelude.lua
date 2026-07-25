@@ -43,6 +43,6 @@ end
 -- which remembers it so it can run its stages later.
 function Card:add_effect()
     local effect = setmetatable({}, Effect)
-    register_effect(effect)
+    register_effect(self.id, effect)
     return effect
 end

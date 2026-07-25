@@ -10,7 +10,7 @@ use cardcrusher::PLAYER_0;
 #[test]
 fn a_card_reports_the_zone_it_lives_in() {
     let mut duel = Duel::new();
-    let c = duel.add_card(Card);
+    let c = duel.add_card(Card::new(0));
 
     // Freshly added, it hasn't been placed anywhere.
     assert_eq!(duel.zone_of(c), None);
@@ -28,7 +28,7 @@ fn a_card_reports_the_zone_it_lives_in() {
 #[test]
 fn an_unplaced_card_has_no_zone() {
     let mut duel = Duel::new();
-    let c = duel.add_card(Card);
+    let c = duel.add_card(Card::new(0));
     assert_eq!(duel.zone_of(c), None);
 }
 
@@ -36,8 +36,8 @@ fn an_unplaced_card_has_no_zone() {
 #[test]
 fn cards_have_independent_zones() {
     let mut duel = Duel::new();
-    let a = duel.add_card(Card);
-    let b = duel.add_card(Card);
+    let a = duel.add_card(Card::new(0));
+    let b = duel.add_card(Card::new(0));
 
     duel.place(PLAYER_0, a, Zone::Hand);
     duel.place(PLAYER_0, b, Zone::GY);

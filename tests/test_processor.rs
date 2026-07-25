@@ -24,7 +24,7 @@ fn run_answering_menus(duel: &mut Duel) {
 /// Give a player `n` cards to draw, so the Draw Phase doesn't deck them out.
 fn stock_deck(duel: &mut Duel, player: usize, n: usize) {
     for _ in 0..n {
-        duel.add_to_deck(player, Card);
+        duel.add_to_deck(player, Card::new(0));
     }
 }
 

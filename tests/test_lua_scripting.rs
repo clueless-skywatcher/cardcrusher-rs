@@ -39,7 +39,7 @@ fn loading_a_card_registers_its_effect() {
 #[test]
 fn resolving_an_effect_destroys_its_target() {
     let mut duel = Duel::new();
-    let monster = duel.add_card(Card);
+    let monster = duel.add_card(Card::new(0));
 
     duel.load_card("cards/Example.lua")
         .expect("Example.lua should load");
@@ -77,6 +77,39 @@ fn paying_an_effects_cost_deducts_lp_from_the_activating_player() {
     );
 }
 
+/// The cost must be payable: you can't activate an effect whose cost you can't
+/// afford. Example costs 500 LP; at 300 LP the activation is rejected and no LP
+/// is paid. (EDOPro `check_lp_cost`: payable iff cost ≤ LP — paying to 0 is ok.)
+#[test]
+fn cannot_activate_an_unpayable_cost() {
+    let mut duel = Duel::new();
+    let foe = duel.add_card(Card::new(0));
+    duel.place(PLAYER_1, foe, Zone::MonsterZone);
+    duel.load_card("cards/Example.lua")
+        .expect("Example.lua should load");
+    let spell = duel.add_card(Card::new(12345678));
+
+    // Bring player 0 below the 500 LP cost.
+    duel.deal_damage(PLAYER_0, 7700);
+    assert_eq!(duel.life_points(PLAYER_0), 300);
+
+    let status = duel
+        .activate(spell, 0, PLAYER_0)
+        .expect("activate should run");
+
+    assert_ne!(
+        status,
+        DuelStatus::Awaiting,
+        "unpayable cost → no activation"
+    );
+    assert_eq!(duel.life_points(PLAYER_0), 300, "the cost is not paid");
+    assert_eq!(
+        duel.zone_of(foe),
+        Some(Zone::MonsterZone),
+        "nothing is destroyed"
+    );
+}
+
 /// M4 + M5: activating runs the `target` stage, which asks for a selection from
 /// a real candidate set (the opponent's monsters). That YIELDS, freezing the
 /// duel — the cost is paid, but nothing is destroyed yet. We pick a candidate
@@ -84,14 +117,16 @@ fn paying_an_effects_cost_deducts_lp_from_the_activating_player() {
 #[test]
 fn activating_targets_and_destroys_an_opponent_monster() {
     let mut duel = Duel::new();
-    let foe = duel.add_card(Card);
+    let foe = duel.add_card(Card::new(0));
     duel.place(PLAYER_1, foe, Zone::MonsterZone);
     duel.load_card("cards/Example.lua")
         .expect("Example.lua should load");
+    let spell = duel.add_card(Card::new(12345678));
 
-    // Activate as player 0: cost paid, then the duel freezes for the pick.
+    // Activate this card's effect as player 0: cost paid, then freeze for the pick.
     assert_eq!(
-        duel.activate(0, PLAYER_0).expect("activate should run"),
+        duel.activate(spell, 0, PLAYER_0)
+            .expect("activate should run"),
         DuelStatus::Awaiting,
         "the target stage should yield and freeze the duel"
     );
@@ -121,14 +156,16 @@ fn activating_targets_and_destroys_an_opponent_monster() {
 #[test]
 fn opponent_is_relative_to_the_activating_player() {
     let mut duel = Duel::new();
-    let mine = duel.add_card(Card);
+    let mine = duel.add_card(Card::new(0));
     duel.place(PLAYER_0, mine, Zone::MonsterZone);
     duel.load_card("cards/Example.lua")
         .expect("Example.lua should load");
+    let spell = duel.add_card(Card::new(12345678));
 
     // Player 1 activates → their opponent is player 0 → only candidate is `mine`.
     assert_eq!(
-        duel.activate(0, PLAYER_1).expect("activate should run"),
+        duel.activate(spell, 0, PLAYER_1)
+            .expect("activate should run"),
         DuelStatus::Awaiting
     );
     duel.answer_selection(vec![0]);
@@ -149,8 +186,11 @@ fn cannot_activate_with_no_legal_target() {
     // No monsters on the field — nothing to target.
     duel.load_card("cards/Example.lua")
         .expect("Example.lua should load");
+    let spell = duel.add_card(Card::new(12345678));
 
-    let status = duel.activate(0, PLAYER_0).expect("activate should run");
+    let status = duel
+        .activate(spell, 0, PLAYER_0)
+        .expect("activate should run");
 
     assert_ne!(
         status,

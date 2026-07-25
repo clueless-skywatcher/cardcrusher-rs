@@ -6,6 +6,7 @@
 
 use mlua::thread::ThreadStatus;
 
+use crate::effect::CostType;
 use crate::ids::CardId;
 use crate::processor::DuelStatus;
 use crate::zone::Zone;
@@ -29,18 +30,44 @@ impl Duel {
         self.effect_ctx.borrow_mut().targets = targets;
     }
 
-    pub fn pay_cost(&mut self, effect_idx: usize, player: usize) -> mlua::Result<()> {
-        let effect_table = self.effects.borrow()[effect_idx].clone();
+    /// Run the effect's `cost` stage and commit the declared costs — but only if
+    /// the player can afford ALL of them. Returns `false` (paying nothing) if any
+    /// is unpayable, so activation can be rejected.
+    pub fn pay_cost(&mut self, effect_idx: usize, player: usize) -> mlua::Result<bool> {
+        let effect_table = self.effects.borrow()[effect_idx].1.clone();
         let cost_func = effect_table.get::<mlua::Function>("cost")?;
-        // The effect table is both `self` and `e` — its verbs reach the context.
+        // The effect table is both `self` and `e` — its verbs declare the cost(s).
         cost_func.call::<()>((effect_table.clone(), effect_table))?;
 
-        self.handle_lp_payment(player);
-        Ok(())
+        // Take the declared costs out; commit only if every one is payable.
+        let costs: Vec<CostType> = self.effect_ctx.borrow_mut().costs.drain(..).collect();
+        if !costs.iter().all(|cost| self.can_pay(cost, player)) {
+            return Ok(false);
+        }
+        for cost in &costs {
+            self.apply_cost(cost, player);
+        }
+        Ok(true)
+    }
+
+    /// Whether `player` can currently pay `cost`.
+    fn can_pay(&self, cost: &CostType, player: usize) -> bool {
+        match cost {
+            // EDOPro `check_lp_cost`: payable iff the cost is ≤ their LP (paying
+            // down to exactly 0 is legal).
+            CostType::LifePoints(n) => self.life_points(player) >= *n,
+        }
+    }
+
+    /// Apply a cost that has already been verified payable.
+    fn apply_cost(&mut self, cost: &CostType, player: usize) {
+        match cost {
+            CostType::LifePoints(n) => self.pay_lp(player, *n),
+        }
     }
 
     pub fn resolve_effect(&mut self, effect_idx: usize) -> mlua::Result<()> {
-        let effect_table = self.effects.borrow()[effect_idx].clone();
+        let effect_table = self.effects.borrow()[effect_idx].1.clone();
         let resolve_func = effect_table.get::<mlua::Function>("resolve")?;
         resolve_func.call::<()>((effect_table.clone(), effect_table))?;
 
@@ -50,18 +77,34 @@ impl Duel {
 
     // ===== M4/M5: the coroutine bridge ======================================
 
-    /// Activate an effect. Run its `target` stage on a Lua coroutine FIRST (so we
-    /// learn the candidate set), then:
-    /// - it asked for a selection with legal candidates → pay cost, freeze
-    ///   (`Awaiting`) for the pick;
-    /// - it asked but the candidate set is empty → reject up front (no cost);
-    /// - it asked for nothing → pay cost and resolve immediately.
+    /// Activate `card`'s effect in `slot`, as `player`. In order:
+    /// - fail if the card has no such effect;
+    /// - fail if the effect's `condition` returns false (no cost, no freeze);
+    /// - run the `target` stage on a Lua coroutine to learn the candidate set;
+    ///   with legal candidates → pay cost, freeze (`Awaiting`) for the pick; an
+    ///   empty candidate set → reject up front (no cost); no selection asked →
+    ///   pay cost and resolve immediately.
     ///
     /// Cost is paid only once the activation is committed — never on a rejection.
-    pub fn activate(&mut self, effect_idx: usize, player: usize) -> mlua::Result<DuelStatus> {
-        self.effect_ctx.borrow_mut().activator = player;
+    pub fn activate(
+        &mut self,
+        card: CardId,
+        slot: usize,
+        player: usize,
+    ) -> mlua::Result<DuelStatus> {
+        let idx = match self.effect_index(card, slot) {
+            Some(i) => i,
+            None => return Ok(DuelStatus::End),
+        };
+        let effect = self.effects.borrow()[idx].1.clone();
 
-        let effect = self.effects.borrow()[effect_idx].clone();
+        // Set the activator BEFORE `condition` — a condition can ask about
+        // YOU/OPPONENT, which are relative to the activating player.
+        self.effect_ctx.borrow_mut().activator = player;
+        if !self.check_condition(&effect)? {
+            return Ok(DuelStatus::End);
+        }
+
         let target_func = effect.get::<mlua::Function>("target")?;
         let thread = self.vm.create_thread(target_func)?;
         thread.resume::<mlua::Value>((effect.clone(), effect))?;
@@ -73,14 +116,19 @@ impl Duel {
                     // No legal target → activation is rejected; cost is NOT paid.
                     return Ok(DuelStatus::End);
                 }
-                self.pay_cost(effect_idx, player)?;
-                self.pending = Some((thread, effect_idx));
+                if !self.pay_cost(idx, player)? {
+                    // Can't pay the cost → activation is rejected.
+                    return Ok(DuelStatus::End);
+                }
+                self.pending = Some((thread, idx));
                 Ok(DuelStatus::Awaiting)
             }
             // No selection needed — pay cost and resolve straight away.
             _ => {
-                self.pay_cost(effect_idx, player)?;
-                self.resolve_effect(effect_idx)?;
+                if !self.pay_cost(idx, player)? {
+                    return Ok(DuelStatus::End);
+                }
+                self.resolve_effect(idx)?;
                 Ok(DuelStatus::End)
             }
         }
@@ -110,6 +158,23 @@ impl Duel {
         Ok(DuelStatus::End)
     }
 
+    pub fn code_effects(&self, code: u32) -> Vec<mlua::Table> {
+        self.effects
+            .borrow()
+            .iter()
+            .filter(|(c, _)| *c == code)
+            .map(|(_, t)| t.clone())
+            .collect()
+    }
+
+    pub fn effects_of(&self, card: CardId) -> Vec<mlua::Table> {
+        let card = self.get_card(card);
+        match card {
+            Some(card) => self.code_effects(card.code),
+            None => Vec::new(),
+        }
+    }
+
     fn handle_destroys(&mut self) {
         let to_destroy: Vec<CardId> = self.effect_ctx.borrow_mut().to_destroy.drain(..).collect();
         for card in to_destroy {
@@ -117,8 +182,19 @@ impl Duel {
         }
     }
 
-    fn handle_lp_payment(&mut self, player: usize) {
-        let lp_to_pay: u32 = std::mem::take(&mut self.effect_ctx.borrow_mut().lp_payment);
-        self.pay_lp(player, lp_to_pay);
+    fn effect_index(&self, card: CardId, slot: usize) -> Option<usize> {
+        let code = self.get_card(card)?.code;
+        self.effects
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, (c, _))| *c == code)
+            .nth(slot)
+            .map(|(i, _)| i)
+    }
+
+    fn check_condition(&self, effect: &mlua::Table) -> mlua::Result<bool> {
+        let cond = effect.get::<mlua::Function>("condition")?;
+        cond.call::<bool>((effect.clone(), effect.clone()))
     }
 }

@@ -8,8 +8,8 @@ use cardcrusher::duel::Duel;
 #[test]
 fn a_deleted_cards_id_resolves_to_nothing() {
     let mut duel = Duel::new();
-    let a = duel.add_card(Card);
-    let b = duel.add_card(Card);
+    let a = duel.add_card(Card::new(0));
+    let b = duel.add_card(Card::new(0));
 
     assert!(duel.get_card(a).is_some());
     assert!(duel.get_card(b).is_some());
@@ -27,7 +27,7 @@ fn a_deleted_cards_id_resolves_to_nothing() {
 #[test]
 fn removing_the_same_card_twice_yields_none_the_second_time() {
     let mut duel = Duel::new();
-    let a = duel.add_card(Card);
+    let a = duel.add_card(Card::new(0));
 
     assert!(
         duel.remove_card(a).is_some(),
@@ -44,10 +44,10 @@ fn removing_the_same_card_twice_yields_none_the_second_time() {
 #[test]
 fn a_reused_slot_does_not_revive_an_old_id() {
     let mut duel = Duel::new();
-    let a = duel.add_card(Card);
+    let a = duel.add_card(Card::new(0));
     duel.remove_card(a);
 
-    let b = duel.add_card(Card); // may reuse a's freed slot
+    let b = duel.add_card(Card::new(0)); // may reuse a's freed slot
 
     assert!(
         duel.get_card(a).is_none(),
