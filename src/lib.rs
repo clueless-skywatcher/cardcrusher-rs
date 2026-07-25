@@ -57,6 +57,7 @@ pub mod effect;
 pub mod field;
 pub mod group;
 pub mod ids;
+pub mod position;
 pub mod processor;
 pub mod script;
 pub mod zone;

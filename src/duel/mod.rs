@@ -12,17 +12,19 @@
 //! - [`driver`]    — player I/O, turn control, the processor loop.
 //! - [`scripting`] — loading cards and running their Lua effects.
 
+mod battle;
 mod board;
 mod driver;
 mod scripting;
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use mlua::{Lua, Table, Thread};
 use slotmap::SlotMap;
 
-use crate::card::Card;
+use crate::card::{Card, CardData};
 use crate::constants::DuelMessage;
 use crate::effect::EffectContext;
 use crate::field::Field;
@@ -47,6 +49,12 @@ pub struct Duel {
     max_turns: usize,
     /// Which player took each turn, in order.
     turn_hist: Vec<usize>,
+    /// Normal Summons each player has used **this turn** (reset at turn start).
+    /// The base rule caps this at 1 — enforced by the Main-Phase menu.
+    normal_summons: [u8; 2],
+    /// The most recently declared attack: `(attacker, target)`, `None` target =
+    /// direct. Set by `declare_attack`; B3 will resolve it into damage.
+    last_attack: Option<(CardId, Option<CardId>)>,
     lps: [u32; 2],
     decked_out: [bool; 2],
     result: Option<Winner>,
@@ -58,6 +66,10 @@ pub struct Duel {
     /// Every effect a loaded card registered, as a Lua object handle. Filled by
     /// the `register_effect` hook that the prelude's `add_effect` calls.
     effects: Rc<RefCell<Vec<(u32, Table)>>>,
+    /// Static card definitions harvested from scripts, keyed by `code`. Filled by
+    /// the `register_card` hook that the prelude's `Card:new` calls. `BTreeMap`
+    /// (not `HashMap`) for deterministic iteration.
+    card_data: Rc<RefCell<BTreeMap<u32, CardData>>>,
     effect_ctx: Rc<RefCell<EffectContext>>,
 
     pending: Option<(Thread, usize, CardId)>,
@@ -75,13 +87,20 @@ impl Duel {
     pub fn new() -> Self {
         let field = Rc::new(RefCell::new(Field::new()));
         let effects = Rc::new(RefCell::new(Vec::new()));
+        let card_data = Rc::new(RefCell::new(BTreeMap::new()));
         let effect_ctx = Rc::new(RefCell::new(EffectContext::default()));
 
         let vm = Lua::new();
         vm.gc_stop(); // determinism: no nondeterministic GC pauses
 
-        Self::set_globals(&vm, effects.clone(), effect_ctx.clone(), field.clone())
-            .expect("failed to set up Lua globals");
+        Self::set_globals(
+            &vm,
+            effects.clone(),
+            card_data.clone(),
+            effect_ctx.clone(),
+            field.clone(),
+        )
+        .expect("failed to set up Lua globals");
 
         let mut duel = Duel {
             cards: SlotMap::with_key(),
@@ -91,12 +110,15 @@ impl Duel {
             processor_stack: Vec::new(),
             max_turns: 10000,
             turn_hist: vec![],
+            normal_summons: [0, 0],
+            last_attack: None,
             lps: [8000, 8000],
             decked_out: [false, false],
             result: None,
             win_reason: None,
             vm,
             effects,
+            card_data,
             effect_ctx,
             pending: None,
         };
@@ -110,6 +132,7 @@ impl Duel {
     fn set_globals(
         vm: &Lua,
         effects: Rc<RefCell<Vec<(u32, Table)>>>,
+        card_data: Rc<RefCell<BTreeMap<u32, CardData>>>,
         effect_ctx: Rc<RefCell<EffectContext>>,
         field: Rc<RefCell<Field>>,
     ) -> mlua::Result<()> {
@@ -118,6 +141,26 @@ impl Duel {
             Ok(())
         })?;
         vm.globals().set("register_effect", register_effect)?;
+
+        // register_card(code, data) — harvest a card's printed stats from the
+        // `data` table its `Card:new` was given. Missing fields default to 0/"".
+        let register_card = vm.create_function(move |_, (code, data): (u32, Table)| {
+            card_data.borrow_mut().insert(
+                code,
+                CardData {
+                    card_type: data.get("type").unwrap_or(0),
+                    atk: data.get("atk").unwrap_or(0),
+                    def: data.get("def").unwrap_or(0),
+                    level: data.get("level").unwrap_or(0),
+                    attribute: data.get("attribute").unwrap_or(0),
+                    race: data.get("race").unwrap_or(0),
+                    text: data.get("text").unwrap_or_default(),
+                },
+            );
+            Ok(())
+        })?;
+        vm.globals().set("register_card", register_card)?;
+
         crate::effect::register_verbs(vm, effect_ctx, field)?;
         Ok(())
     }

@@ -5,7 +5,8 @@ use cardcrusher::duel::{Duel, WinReason, Winner};
 use cardcrusher::processor::DuelStatus;
 use cardcrusher::{
     CMD_NEXT_PHASE, MSG_NEW_TURN, MSG_PHASE_BATTLE, MSG_PHASE_DRAW, MSG_PHASE_END, MSG_PHASE_MAIN1,
-    MSG_PHASE_MAIN2, MSG_PHASE_STANDBY, MSG_SELECT_IDLECMD, MSG_STARTUP, PLAYER_0, PLAYER_1,
+    MSG_PHASE_MAIN2, MSG_PHASE_STANDBY, MSG_SELECT_BATTLECMD, MSG_SELECT_IDLECMD, MSG_STARTUP,
+    PLAYER_0, PLAYER_1,
 };
 
 /// Drive the duel to `End`, auto-answering every Main-Phase menu with
@@ -49,6 +50,7 @@ fn a_turn_walks_its_phases_and_stops_at_each_main_phase_menu() {
             MSG_PHASE_MAIN1,
             MSG_SELECT_IDLECMD, // Main Phase 1 menu
             MSG_PHASE_BATTLE,
+            MSG_SELECT_BATTLECMD, // Battle Phase menu
             MSG_PHASE_MAIN2,
             MSG_SELECT_IDLECMD, // Main Phase 2 menu
             MSG_PHASE_END,

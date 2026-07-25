@@ -49,6 +49,18 @@ pub enum Processor {
         slot: usize,
         player: usize,
     },
+    /// The Battle-Phase menu: offer `player`'s attackers, or move on.
+    BattleCommand {
+        step: Step,
+        player: usize,
+    },
+    /// A declared attack in progress: `attacker` picks a target (or attacks
+    /// directly), then the attack is declared.
+    Attack {
+        step: Step,
+        attacker: CardId,
+        player: usize,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,6 +78,8 @@ impl Processor {
             Processor::SelectCard { .. } => true,
             Processor::IdleCommand { .. } => true,
             Processor::Activate { .. } => true,
+            Processor::BattleCommand { .. } => true,
+            Processor::Attack { .. } => true,
         }
     }
 }

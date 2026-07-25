@@ -21,6 +21,8 @@ pub const MSG_PHASE_MAIN2: DuelMessage = 14;
 pub const MSG_PHASE_END: DuelMessage = 15;
 
 pub const MSG_SELECT_IDLECMD: DuelMessage = 16;
+/// The Battle-Phase menu — "pick a battle command" (attack, or move on).
+pub const MSG_SELECT_BATTLECMD: DuelMessage = 17;
 
 /// A Main-Phase menu command — the first byte of an idle-command response
 /// (`[command, index]`).
@@ -29,4 +31,6 @@ pub type Command = u8;
 pub const CMD_NEXT_PHASE: Command = 0;
 pub const CMD_SUMMON: Command = 1;
 pub const CMD_ACTIVATE: Command = 5;
+/// Declare an attack — response is `[CMD_ATTACK, attacker_index]`.
+pub const CMD_ATTACK: Command = 7;
 pub const CMD_SET_SPELL_TRAP: Command = 9;

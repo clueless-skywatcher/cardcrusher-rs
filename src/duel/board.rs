@@ -1,9 +1,10 @@
 //! The board & game state: the card arena, deck/hand piles, zones, movement,
 //! life points, and win conditions.
 
-use crate::card::Card;
+use crate::card::{Card, CardData};
 use crate::constants::{PLAYER_0, PLAYER_1};
 use crate::ids::CardId;
+use crate::position::Position;
 use crate::zone::Zone;
 
 use super::{Duel, WinReason, Winner};
@@ -13,6 +14,39 @@ impl Duel {
 
     pub fn add_card(&mut self, card: Card) -> CardId {
         self.cards.insert(card)
+    }
+
+    /// Make a card of `code` with the stats its loaded script declared. If the
+    /// code was never loaded, the stats are all zero (a bare card).
+    pub fn make_card(&self, code: u32) -> Card {
+        let data = self
+            .card_data
+            .borrow()
+            .get(&code)
+            .cloned()
+            .unwrap_or_default();
+        Card::with_data(code, data)
+    }
+
+    // ===== Card stats (harvested from the script) ===========================
+
+    /// The full printed record of a card instance (type/atk/def/level/…).
+    pub fn card_data(&self, card: CardId) -> Option<&CardData> {
+        self.get_card(card).map(|c| &c.data)
+    }
+
+    /// A monster's ATK / DEF — the numbers the Battle Phase compares.
+    pub fn atk_of(&self, card: CardId) -> Option<i32> {
+        self.get_card(card).map(|c| c.data.atk)
+    }
+
+    pub fn def_of(&self, card: CardId) -> Option<i32> {
+        self.get_card(card).map(|c| c.data.def)
+    }
+
+    /// A monster's level (for tribute/level checks later).
+    pub fn level_of(&self, card: CardId) -> Option<u32> {
+        self.get_card(card).map(|c| c.data.level)
     }
 
     pub fn get_card(&self, id: CardId) -> Option<&Card> {
@@ -82,11 +116,61 @@ impl Duel {
         self.field.borrow_mut().send_to(card, zone);
     }
 
-    /// Put a card onto the field as a monster. A shared operation — the menu and
-    /// card effects both call it, from any source zone; the caller decides what's
-    /// legal.
+    /// Put a card onto the field as a monster, **face-up in attack position**. A
+    /// shared primitive — the menu (Normal Summon) and card effects (Special
+    /// Summon) both call it, from any source zone; the caller decides what's legal
+    /// (e.g. the once-per-turn Normal Summon limit lives in the menu, not here).
     pub fn summon(&mut self, card: CardId) {
         self.field.borrow_mut().send_to(card, Zone::MonsterZone);
+        self.set_position(card, Position::FaceUpAttack);
+    }
+
+    /// Set a monster **face-down in defense position** (the monster equivalent of
+    /// "Set"). Like `summon`, a primitive — the caller enforces legality.
+    pub fn set_monster(&mut self, card: CardId) {
+        self.field.borrow_mut().send_to(card, Zone::MonsterZone);
+        self.set_position(card, Position::FaceDownDefense);
+    }
+
+    /// A monster's current battle position — `None` unless it's in a Monster Zone
+    /// (a card in hand / GY / deck has no battle position).
+    pub fn position_of(&self, card: CardId) -> Option<Position> {
+        match self.zone_of(card) {
+            Some(Zone::MonsterZone) => self.get_card(card).map(|c| c.position),
+            _ => None,
+        }
+    }
+
+    /// Change a monster's position — flip it face-up, or switch attack/defense.
+    /// A no-op unless the card is in a Monster Zone.
+    pub fn change_position(&mut self, card: CardId, pos: Position) {
+        if self.zone_of(card) == Some(Zone::MonsterZone) {
+            self.set_position(card, pos);
+        }
+    }
+
+    /// Stamp a position onto the card instance (unconditional; callers gate it).
+    fn set_position(&mut self, card: CardId, pos: Position) {
+        if let Some(c) = self.cards.get_mut(card) {
+            c.position = pos;
+        }
+    }
+
+    /// Whether `player` may still Normal Summon (or Set) this turn. Base rule:
+    /// **once per turn** — the counter resets at the start of each turn. (Special
+    /// Summons don't go through this, so they aren't limited by it.)
+    pub fn can_normal_summon(&self, player: usize) -> bool {
+        self.normal_summons[player] < 1
+    }
+
+    /// Record that `player` used their Normal Summon this turn.
+    pub fn record_normal_summon(&mut self, player: usize) {
+        self.normal_summons[player] += 1;
+    }
+
+    /// Reset the Normal-Summon counter (called at the start of each turn).
+    pub(crate) fn reset_normal_summons(&mut self) {
+        self.normal_summons = [0, 0];
     }
 
     /// Set a card face-down in the spell/trap zone. Shared by the menu and card

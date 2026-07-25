@@ -115,6 +115,8 @@ impl Duel {
             Processor::Turn { step, player } => {
                 if *step == 0 {
                     self.turn_hist.push(*player);
+                    // Fresh turn → each player's Normal Summon is available again.
+                    self.reset_normal_summons();
                 }
                 const PHASES: [DuelMessage; 7] = [
                     MSG_NEW_TURN,
@@ -130,6 +132,13 @@ impl Duel {
                 self.messages.push(PHASES[i]);
                 if PHASES[i] == MSG_PHASE_MAIN1 || PHASES[i] == MSG_PHASE_MAIN2 {
                     self.processor_stack.push(Processor::IdleCommand {
+                        step: 0,
+                        player: *player,
+                    });
+                    *step += 1;
+                    return false;
+                } else if PHASES[i] == MSG_PHASE_BATTLE {
+                    self.processor_stack.push(Processor::BattleCommand {
                         step: 0,
                         player: *player,
                     });
@@ -187,8 +196,13 @@ impl Duel {
                             // Bind first so the field borrow drops before `summon`
                             // (which takes `borrow_mut()`).
                             let card = self.field.borrow().hand_card(*player, slot);
+                            // Normal Summon: gated once per turn. A blocked attempt
+                            // just re-shows the menu (no summon, no cost).
                             if let Some(card) = card {
-                                self.summon(card);
+                                if self.can_normal_summon(*player) {
+                                    self.summon(card);
+                                    self.record_normal_summon(*player);
+                                }
                             }
                             self.messages.push(MSG_SELECT_IDLECMD);
                             false
@@ -260,6 +274,77 @@ impl Duel {
                     true
                 }
             },
+            Processor::BattleCommand { step, player } => match step {
+                // Step 0: offer the menu, then freeze for a choice.
+                0 => {
+                    *step += 1;
+                    self.messages.push(MSG_SELECT_BATTLECMD);
+                    false
+                }
+                // Step 1+: act on the chosen command. Response = [command, index].
+                _ => {
+                    let command = self.responses.first().copied().unwrap_or(CMD_NEXT_PHASE);
+                    match command {
+                        // End the Battle Phase → the menu is done.
+                        CMD_NEXT_PHASE => true,
+                        // Attack with the chosen attacker (index into `attackers`).
+                        CMD_ATTACK => {
+                            let idx = self.responses.get(1).copied().unwrap_or(0) as usize;
+                            if let Some(&attacker) = self.attackers(*player).get(idx) {
+                                self.processor_stack.push(Processor::Attack {
+                                    step: 0,
+                                    attacker,
+                                    player: *player,
+                                });
+                                true
+                            } else {
+                                // No such attacker — stay in the menu.
+                                self.messages.push(MSG_SELECT_BATTLECMD);
+                                false
+                            }
+                        }
+                        // Anything else keeps us in the Battle Phase — re-show.
+                        _ => {
+                            self.messages.push(MSG_SELECT_BATTLECMD);
+                            false
+                        }
+                    }
+                }
+            },
+            Processor::Attack {
+                step,
+                attacker,
+                player,
+            } => match step {
+                // Step 0: with opponent monsters, freeze to pick a target;
+                // otherwise it's a direct attack — declare it now.
+                0 => {
+                    if self.attack_targets(*player).is_empty() {
+                        self.declare_attack(*attacker, None);
+                        self.reopen_battle_menu(*player);
+                        true
+                    } else {
+                        self.messages.push(MSG_SELECT_CARD);
+                        *step += 1;
+                        false
+                    }
+                }
+                // Step 1: the picked target index → declare "attacker vs target".
+                _ => {
+                    let idx = self.responses.first().copied().unwrap_or(0) as usize;
+                    let target = self.attack_targets(*player).get(idx).copied();
+                    self.declare_attack(*attacker, target);
+                    self.reopen_battle_menu(*player);
+                    true
+                }
+            },
         }
+    }
+
+    /// After an attack is declared, reopen the Battle-Phase menu so the player
+    /// can attack with another monster (until they choose to move on).
+    fn reopen_battle_menu(&mut self, player: usize) {
+        self.processor_stack
+            .push(Processor::BattleCommand { step: 0, player });
     }
 }
