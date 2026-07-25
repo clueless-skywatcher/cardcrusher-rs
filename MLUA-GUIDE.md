@@ -41,7 +41,20 @@ let f = lua.create_function(|_, n: i64| Ok(n * 2))?;
 lua.globals().set("double", f)?;
 ```
 
-Signature: `Fn(&Lua, Args) -> mlua::Result<Ret>`. We use a few globals like this
+**What `|_, n: i64| Ok(n * 2)` is** — a Rust **closure**: an anonymous function
+you pass around as a value.
+
+- The **`|...|`** holds the parameters — like the `()` in a normal `fn`. Here
+  `_` (the VM, ignored) and `n: i64`.
+- After the pipes comes the **body**. The **last expression is the return value**
+  — no `return`, no trailing `;` (so `Ok(n * 2)` is what it gives back).
+- Multi-line body → use braces: `|_, n: i64| { let d = n * 2; Ok(d) }`.
+- **`move`** before the pipes (`move |...|`) makes the closure **take ownership**
+  of what it captures. Needed when it outlives the current scope — e.g. we store
+  it in the VM, so the captured `Rc` must move in (that's why our hooks say
+  `move`).
+
+Signature it must match here: `Fn(&Lua, Args) -> mlua::Result<Ret>`. We use a few globals like this
 (constants, `add_effect`'s Rust hook), but **most card verbs live on the `e`
 object** as UserData methods (§6), not as globals.
 
@@ -145,8 +158,22 @@ impl UserData for Effect {
 }
 ```
 
-- **`add_method`** → the closure gets `(&Lua, &Effect, args)`.
-- **`add_method_mut`** → gets `&mut Effect` (when the verb mutates the effect).
+**Reading the closure `|_, this, n: u32|`** — every `add_method` closure takes
+**three** things, in this order:
+
+| Param | Is | Example above |
+|-------|----|---------------|
+| 1st | the `&Lua` VM | `_` (unused here) |
+| 2nd | `this: &Self` — the object the method was called on (the `self`) | `this` |
+| 3rd | the Lua argument(s) | `n: u32` — what `e:pay_lp(500)` passed |
+
+So `e:pay_lp(500)` in Lua lands as: `_` = the VM, `this` = the `Effect`, `n` =
+`500`. The closure must return `mlua::Result<_>` — end it with `Ok(())` (or
+`Ok(value)`). A one-arg closure like `|n: u32|` **won't compile**: the VM and
+`this` params are required even when unused (`|_, _this, n: u32|`).
+
+- **`add_method`** → `this` is `&Self` (read-only).
+- **`add_method_mut`** → `this` is `&mut Self` (when the verb mutates the effect).
 
 Make one and pass it into a stage call:
 

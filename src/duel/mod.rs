@@ -19,7 +19,7 @@ mod scripting;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mlua::{Lua, Table};
+use mlua::{Lua, Table, Thread};
 use slotmap::SlotMap;
 
 use crate::card::Card;
@@ -59,6 +59,8 @@ pub struct Duel {
     /// the `register_effect` hook that the prelude's `add_effect` calls.
     effects: Rc<RefCell<Vec<Table>>>,
     effect_ctx: Rc<RefCell<EffectContext>>,
+
+    pending: Option<(Thread, usize)>,
 }
 
 impl Default for Duel {
@@ -73,11 +75,13 @@ impl Duel {
     pub fn new() -> Self {
         let field = Rc::new(RefCell::new(Field::new()));
         let effects = Rc::new(RefCell::new(Vec::new()));
+        let effect_ctx = Rc::new(RefCell::new(EffectContext::default()));
 
         let vm = Lua::new();
         vm.gc_stop(); // determinism: no nondeterministic GC pauses
 
-        Self::set_globals(&vm, effects.clone()).expect("failed to set up Lua globals");
+        Self::set_globals(&vm, effects.clone(), effect_ctx.clone(), field.clone())
+            .expect("failed to set up Lua globals");
 
         let mut duel = Duel {
             cards: SlotMap::with_key(),
@@ -93,20 +97,28 @@ impl Duel {
             win_reason: None,
             vm,
             effects,
-            effect_ctx: Rc::new(RefCell::new(EffectContext::default())),
+            effect_ctx,
+            pending: None,
         };
         duel.load_prelude();
         duel
     }
 
-    /// Register the Rust hooks the prelude calls. `register_effect` is how the
-    /// Lua `add_effect` hands each effect object back to the duel to remember.
-    fn set_globals(vm: &Lua, effects: Rc<RefCell<Vec<Table>>>) -> mlua::Result<()> {
+    /// Register the Rust hooks the prelude calls: `register_effect` (how Lua's
+    /// `add_effect` hands each effect back to the duel) and the effect verbs
+    /// (`e:destroy`/`pay_lp`/`targets`, wired to the shared context).
+    fn set_globals(
+        vm: &Lua,
+        effects: Rc<RefCell<Vec<Table>>>,
+        effect_ctx: Rc<RefCell<EffectContext>>,
+        field: Rc<RefCell<Field>>,
+    ) -> mlua::Result<()> {
         let hook = vm.create_function(move |_, eff: Table| {
             effects.borrow_mut().push(eff);
             Ok(())
         })?;
         vm.globals().set("register_effect", hook)?;
+        crate::effect::register_verbs(vm, effect_ctx, field)?;
         Ok(())
     }
 
