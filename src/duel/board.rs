@@ -32,6 +32,13 @@ impl Duel {
         id
     }
 
+    /// Create a card and put it into a player's hand.
+    pub fn add_to_hand(&mut self, player: usize, card: Card) -> CardId {
+        let id = self.cards.insert(card);
+        self.field.borrow_mut().add_to_hand(player, id);
+        id
+    }
+
     /// Draw `count` cards off the top of a player's deck into their hand. If the
     /// deck can't supply them all, that player decks out (a loss).
     pub fn draw(&mut self, player: usize, count: usize) -> Vec<CardId> {
@@ -49,6 +56,16 @@ impl Duel {
 
     pub fn hand_count(&self, player: usize) -> usize {
         self.field.borrow().hand_count(player)
+    }
+
+    /// The card at a given slot in a player's hand, if any.
+    pub fn hand_card(&self, player: usize, index: usize) -> Option<CardId> {
+        self.field.borrow().hand_card(player, index)
+    }
+
+    /// The cards a player controls in their Monster Zone.
+    pub fn monster_zone(&self, player: usize) -> Vec<CardId> {
+        self.field.borrow().monster_zone(player)
     }
 
     // ===== Zones & movement =================================================

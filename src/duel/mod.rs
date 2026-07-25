@@ -60,7 +60,7 @@ pub struct Duel {
     effects: Rc<RefCell<Vec<(u32, Table)>>>,
     effect_ctx: Rc<RefCell<EffectContext>>,
 
-    pending: Option<(Thread, usize)>,
+    pending: Option<(Thread, usize, CardId)>,
 }
 
 impl Default for Duel {

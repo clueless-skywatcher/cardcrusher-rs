@@ -1,6 +1,6 @@
 YoureInDanger = Card:new(10312660)
 
-local activate = YoureInDanger:add_effect()
+local activate = YoureInDanger:add_effect(ACTIVATE)
 activate.frequency = {HARD_PER_TURN, 1}
 
 function activate:condition(effect)

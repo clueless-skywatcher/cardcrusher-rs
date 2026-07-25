@@ -3,7 +3,7 @@
 
 CantActivate = Card:new(11111111)
 
-local activate = CantActivate:add_effect()
+local activate = CantActivate:add_effect(ACTIVATE)
 
 function activate:condition(effect)
     return false

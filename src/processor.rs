@@ -23,14 +23,32 @@
 //! exactly where it left off. A paused note on a stack can do that; a half-finished
 //! normal function call cannot.
 
+use crate::ids::CardId;
+
 pub type Step = u16;
 
 #[derive(Debug)]
 pub enum Processor {
-    Startup { step: Step },
-    Turn { step: Step, player: usize },
-    SelectCard { step: Step },
-    IdleCommand { step: Step, player: usize },
+    Startup {
+        step: Step,
+    },
+    Turn {
+        step: Step,
+        player: usize,
+    },
+    SelectCard {
+        step: Step,
+    },
+    IdleCommand {
+        step: Step,
+        player: usize,
+    },
+    Activate {
+        step: Step,
+        card: CardId,
+        slot: usize,
+        player: usize,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -47,6 +65,7 @@ impl Processor {
             Processor::Startup { .. } | Processor::Turn { .. } => false,
             Processor::SelectCard { .. } => true,
             Processor::IdleCommand { .. } => true,
+            Processor::Activate { .. } => true,
         }
     }
 }

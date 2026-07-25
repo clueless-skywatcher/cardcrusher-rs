@@ -203,12 +203,61 @@ impl Duel {
                             self.messages.push(MSG_SELECT_IDLECMD);
                             false
                         }
+                        CMD_ACTIVATE => {
+                            // The index selects one of the player's currently
+                            // activatable effects (kind + location + condition).
+                            let opt = self.responses.get(1).copied().unwrap_or(0) as usize;
+                            let options = self.activatable_effects(*player);
+                            if let Some(&(card, slot)) = options.get(opt) {
+                                self.processor_stack.push(Processor::Activate {
+                                    step: 0,
+                                    card,
+                                    slot,
+                                    player: *player,
+                                });
+                            }
+                            true
+                        }
                         // Anything else keeps us in the Main Phase — re-show.
                         _ => {
                             self.messages.push(MSG_SELECT_IDLECMD);
                             false
                         }
                     }
+                }
+            },
+            Processor::Activate {
+                step,
+                card,
+                slot,
+                player,
+            } => match step {
+                0 => match self.activate(*card, *slot, *player).expect("activate") {
+                    DuelStatus::Awaiting => {
+                        self.messages.push(MSG_SELECT_CARD);
+                        *step += 1;
+                        false
+                    }
+                    // Resolved (or rejected) with no selection → back to the menu.
+                    _ => {
+                        self.processor_stack.push(Processor::IdleCommand {
+                            step: 0,
+                            player: *player,
+                        });
+                        true
+                    }
+                },
+                _ => {
+                    let indices = self.responses.iter().map(|&b| b as usize).collect();
+                    self.answer_selection(indices);
+                    self.resume().expect("resuming");
+                    // The effect resolved → return to the Main-Phase menu, so the
+                    // player keeps control of the phase until they pass.
+                    self.processor_stack.push(Processor::IdleCommand {
+                        step: 0,
+                        player: *player,
+                    });
+                    true
                 }
             },
         }

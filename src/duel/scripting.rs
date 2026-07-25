@@ -6,7 +6,7 @@
 
 use mlua::thread::ThreadStatus;
 
-use crate::effect::CostType;
+use crate::effect::{CostType, EffectKind};
 use crate::ids::CardId;
 use crate::processor::DuelStatus;
 use crate::zone::Zone;
@@ -97,6 +97,9 @@ impl Duel {
             None => return Ok(DuelStatus::End),
         };
         let effect = self.effects.borrow()[idx].1.clone();
+        // A Spell/Trap card activation (Activate kind) has a card lifecycle: it
+        // moves to the field on activation and to the GY after it resolves.
+        let is_spell = self.effect_kind(&effect) == EffectKind::Activate;
 
         // Set the activator BEFORE `condition` — a condition can ask about
         // YOU/OPPONENT, which are relative to the activating player.
@@ -120,7 +123,11 @@ impl Duel {
                     // Can't pay the cost → activation is rejected.
                     return Ok(DuelStatus::End);
                 }
-                self.pending = Some((thread, idx));
+                // The activated Spell/Trap goes to the field (EDOPro AddChain).
+                if is_spell {
+                    self.send_to(card, Zone::SpellTrapZone);
+                }
+                self.pending = Some((thread, idx, card));
                 Ok(DuelStatus::Awaiting)
             }
             // No selection needed — pay cost and resolve straight away.
@@ -128,10 +135,23 @@ impl Duel {
                 if !self.pay_cost(idx, player)? {
                     return Ok(DuelStatus::End);
                 }
+                if is_spell {
+                    self.send_to(card, Zone::SpellTrapZone);
+                }
                 self.resolve_effect(idx)?;
+                if is_spell {
+                    // Once resolved, a Spell/Trap is sent to the GY by rule.
+                    self.send_to(card, Zone::GY);
+                }
                 Ok(DuelStatus::End)
             }
         }
+    }
+
+    /// The candidate cards offered by the effect currently awaiting a selection
+    /// (what a `MSG_SELECT_CARD` prompt is asking you to pick from).
+    pub fn candidates(&self) -> Vec<CardId> {
+        self.effect_ctx.borrow().candidates.clone()
     }
 
     /// Pick the effect's targets by index into the offered candidate set (what
@@ -148,13 +168,23 @@ impl Duel {
     /// `prompt_selection` (so it *returns* them), let the `target` stage finish,
     /// then resolve the effect.
     pub fn resume(&mut self) -> mlua::Result<DuelStatus> {
-        let (thread, index) = self
+        let (thread, index, card) = self
             .pending
             .take()
             .expect("nothing is awaiting a selection");
+        let is_spell = self
+            .effects
+            .borrow()
+            .get(index)
+            .map(|(_, t)| self.effect_kind(t))
+            == Some(EffectKind::Activate);
         let chosen = crate::effect::encode_ids(&self.effect_ctx.borrow().targets);
         thread.resume::<mlua::Value>(chosen)?;
         self.resolve_effect(index)?;
+        if is_spell {
+            // Once resolved, a Spell/Trap is sent to the GY by rule.
+            self.send_to(card, Zone::GY);
+        }
         Ok(DuelStatus::End)
     }
 
@@ -173,6 +203,51 @@ impl Duel {
             Some(card) => self.code_effects(card.code),
             None => Vec::new(),
         }
+    }
+
+    /// The effects `player` can activate right now, as `(card, effect slot)`:
+    /// `Activate` effects on cards in their hand, and `Ignition` effects on
+    /// monsters they control — each with a passing `condition`. (`Quick`/`Trigger`
+    /// need the chain/event engine and are never offered here yet.)
+    pub fn activatable_effects(&self, player: usize) -> Vec<(CardId, usize)> {
+        let hand: Vec<CardId> = {
+            let f = self.field.borrow();
+            (0..f.hand_count(player))
+                .filter_map(|i| f.hand_card(player, i))
+                .collect()
+        };
+        let monsters = self.field.borrow().monster_zone(player);
+
+        let mut out = Vec::new();
+        for card in hand {
+            self.collect_activatable(card, EffectKind::Activate, player, &mut out);
+        }
+        for card in monsters {
+            self.collect_activatable(card, EffectKind::Ignition, player, &mut out);
+        }
+        out
+    }
+
+    /// Append `(card, slot)` for each of `card`'s effects of kind `want` whose
+    /// `condition` currently passes.
+    fn collect_activatable(
+        &self,
+        card: CardId,
+        want: EffectKind,
+        player: usize,
+        out: &mut Vec<(CardId, usize)>,
+    ) {
+        self.effect_ctx.borrow_mut().activator = player;
+        for (slot, effect) in self.effects_of(card).iter().enumerate() {
+            if self.effect_kind(effect) == want && self.check_condition(effect).unwrap_or(false) {
+                out.push((card, slot));
+            }
+        }
+    }
+
+    /// An effect's declared kind (read from its Lua table; defaults to Activate).
+    fn effect_kind(&self, effect: &mlua::Table) -> EffectKind {
+        EffectKind::from_code(effect.get::<u32>("kind").unwrap_or(0))
     }
 
     fn handle_destroys(&mut self) {

@@ -6,7 +6,7 @@
 
 Example = Card:new(12345678) -- Register a card with the ID 12345678
 
-local activate = Example:add_effect()
+local activate = Example:add_effect(ACTIVATE)
 
 function activate:cost(effect)
     effect:pay_lp(500) -- Pay LP

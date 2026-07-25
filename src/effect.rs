@@ -40,6 +40,33 @@ pub enum CostType {
     LifePoints(u32),
 }
 
+/// How/where an effect is activated. The integer values match the prelude's
+/// `ACTIVATE`/`IGNITION`/`QUICK`/`TRIGGER` constants a card passes to
+/// `add_effect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectKind {
+    /// A Spell/Trap card's activation — from the hand (or a set S/T zone).
+    Activate,
+    /// A manual effect on a card you control, on your Main Phase.
+    Ignition,
+    /// A quick effect — needs the chain/priority engine (not activatable yet).
+    Quick,
+    /// Fires on an event — needs the event engine (not activatable yet).
+    Trigger,
+}
+
+impl EffectKind {
+    /// Map a prelude kind code to an `EffectKind` (0/unknown → `Activate`).
+    pub fn from_code(code: u32) -> Self {
+        match code {
+            1 => EffectKind::Ignition,
+            2 => EffectKind::Quick,
+            3 => EffectKind::Trigger,
+            _ => EffectKind::Activate,
+        }
+    }
+}
+
 /// Register the effect verbs as VM globals the prelude's `Effect` methods call.
 /// Each captures the shared context, so a stage's verbs read/write what the
 /// `Duel` sees. One VM per `Duel`, so each hook is bound to that duel's context.
@@ -51,7 +78,6 @@ pub fn register_verbs(
     // e:targets() -> the chosen targets (card ids, encoded for Lua).
     let c = ctx.clone();
     let targets = lua.create_function(move |_, ()| Ok(encode_ids(&c.borrow().targets)))?;
-    lua.globals().set("effect_targets", targets)?;
 
     // e:destroy(list) -> record those cards to be sent to the GY.
     let c = ctx.clone();
@@ -61,7 +87,6 @@ pub fn register_verbs(
             .extend(ids.into_iter().map(decode));
         Ok(())
     })?;
-    lua.globals().set("effect_destroy", destroy)?;
 
     // e:pay_lp(n) -> declare a "pay n life points" cost.
     let c = ctx.clone();
@@ -69,16 +94,14 @@ pub fn register_verbs(
         c.borrow_mut().costs.push(CostType::LifePoints(n));
         Ok(())
     })?;
-    lua.globals().set("effect_pay_lp", pay_lp)?;
 
     // e:prompt_selection records its candidate set here — for mapping the picked
     // index back to a card, and for the "no legal target" check.
     let c = ctx.clone();
-    let offer = lua.create_function(move |_, ids: Vec<i64>| {
+    let prompt_selection = lua.create_function(move |_, ids: Vec<i64>| {
         c.borrow_mut().candidates = ids.into_iter().map(decode).collect();
         Ok(())
     })?;
-    lua.globals().set("effect_offer", offer)?;
 
     // e:monster_zone(who) -> the monsters `who` controls; `who` is relative to
     // the activating player (YOU = same, OPPONENT = the other).
@@ -87,6 +110,12 @@ pub fn register_verbs(
         let actual = (who + c.borrow().activator) % 2;
         Ok(encode_ids(&field.borrow().monster_zone(actual)))
     })?;
+
+    lua.globals().set("effect_destroy", destroy)?;
+    lua.globals().set("effect_targets", targets)?;
+    lua.globals().set("effect_pay_lp", pay_lp)?;
+    lua.globals()
+        .set("effect_prompt_selection", prompt_selection)?;
     lua.globals().set("effect_monster_zone", monster_zone)?;
 
     Ok(())
