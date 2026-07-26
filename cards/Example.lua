@@ -4,7 +4,11 @@
 -- A card holds effects. Add each with add_effect(), then write only the stages
 -- you change. `e` is the effect at runtime: call verbs on it (e:pay_lp, ...).
 
-Example = Card:new(12345678) -- Register a card with the ID 12345678
+-- A Normal Spell. Its printed record (type + text) is harvested by the engine.
+Example = Card:new(12345678, {
+    type = TYPE_SPELL | TYPE_NORMAL,
+    text = "Pay 500 LP, then destroy 1 monster your opponent controls.",
+})
 
 local activate = Example:add_effect(ACTIVATE)
 

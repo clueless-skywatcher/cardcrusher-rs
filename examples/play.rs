@@ -93,7 +93,8 @@ fn setup() -> Duel {
         let (c, a, d) = deck[(i + 1) % deck.len()];
         duel.add_to_deck(1, mon(c, a, d));
     }
-    duel.add_to_hand(0, Card::new(12345678)); // Example Spell
+    let spell = duel.make_card(12345678); // Example Spell — real record from Lua
+    duel.add_to_hand(0, spell);
     duel.add_to_hand(0, mon(1003, 1300, 1400)); // Feral Imp — a monster to summon
 
     let foe = duel.add_card(mon(1002, 1200, 1500)); // Beaver Warrior on the foe's field
@@ -294,6 +295,9 @@ fn respond_card(label: impl Into<String>, bytes: Vec<u8>, card: CardId) -> Item 
 
 // ===== Card naming & flag decoding =======================================
 
+const TYPE_MONSTER: u32 = 0x1;
+const TYPE_SPELL: u32 = 0x2;
+
 fn card_name(code: u32) -> &'static str {
     match code {
         12345678 => "Example Spell",
@@ -322,6 +326,16 @@ fn pos_abbr(pos: Position) -> &'static str {
         Position::FaceUpDefense => "DEF",
         Position::FaceDownDefense => "SET",
         Position::FaceDownAttack => "f.d.ATK",
+    }
+}
+
+/// Each player's signature colour — stable per player index, so you can tell the
+/// sides apart even as top/bottom swap between turns (hotseat).
+fn player_color(player: usize) -> Color {
+    if player == 0 {
+        Color::Blue
+    } else {
+        Color::Magenta
     }
 }
 
@@ -479,11 +493,18 @@ fn draw_cell(scr: &mut Screen, x: u16, y: u16, duel: &Duel, slot: Option<CardId>
 fn draw_header(scr: &mut Screen, y: u16, duel: &Duel, player: usize, label: &str) {
     let lp = duel.life_points(player);
     let lp_color = if lp <= 2000 { Color::Red } else { Color::Green };
-    scr.put_bold(LABEL_X, y, &format!("{label:<9}"), Color::White);
-    scr.put(LABEL_X + 10, y, "LP ", Color::Grey);
-    scr.put_bold(LABEL_X + 13, y, &format!("{lp:>5}"), lp_color);
+    // The player's name label in their signature colour (LP keeps its danger hue).
+    // Pad to a fixed width so the columns after it stay aligned for both players.
+    scr.put_bold(
+        LABEL_X,
+        y,
+        &format!("{:<14}", format!("{label} (P{player})")),
+        player_color(player),
+    );
+    scr.put(LABEL_X + 15, y, "LP ", Color::Grey);
+    scr.put_bold(LABEL_X + 18, y, &format!("{lp:>5}"), lp_color);
     scr.put(
-        LABEL_X + 20,
+        LABEL_X + 25,
         y,
         &format!(
             "Deck {}   Hand {}   GY {}",
@@ -495,13 +516,11 @@ fn draw_header(scr: &mut Screen, y: u16, duel: &Duel, player: usize, label: &str
     );
 }
 
-fn render(duel: &Duel, ui: &mut Ui, title: &str, items: &[Item]) {
-    let you = current(duel);
-    let focused = focused_card(duel, ui, items);
-    let (focus, row, col, sel) = (ui.focus, ui.row, ui.col, ui.sel);
-    let scr = &mut ui.screen;
-    scr.begin();
-
+/// Draw the whole left board: title bar, both player headers, and the four field
+/// rows (opponent on top, you on the bottom). Cursor highlight only in board
+/// focus. Shared by the normal view and the graveyard inspector.
+fn draw_board(scr: &mut Screen, duel: &Duel, focus: Focus, cursor: (usize, usize), you: usize) {
+    let (row, col) = cursor;
     scr.put_bold(
         LABEL_X,
         TITLE_Y,
@@ -521,7 +540,8 @@ fn render(duel: &Duel, ui: &mut Ui, title: &str, items: &[Item]) {
     let opp = 1 - you;
     draw_header(scr, OPP_HDR_Y, duel, opp, "Opponent");
     for (ri, (player, zone, y, label)) in nav_rows(you).into_iter().enumerate() {
-        scr.put(LABEL_X, y + 1, label, Color::DarkGrey);
+        // Row label in the controlling player's signature colour.
+        scr.put(LABEL_X, y + 1, label, player_color(player));
         let cards = zone_cards(duel, player, zone);
         for c in 0..5 {
             let hi = focus == Focus::Board && row == ri && col == c;
@@ -532,6 +552,16 @@ fn render(duel: &Duel, ui: &mut Ui, title: &str, items: &[Item]) {
         }
     }
     draw_header(scr, YOU_HDR_Y, duel, you, "You");
+}
+
+fn render(duel: &Duel, ui: &mut Ui, title: &str, items: &[Item]) {
+    let you = current(duel);
+    let focused = focused_card(duel, ui, items);
+    let (focus, row, col, sel) = (ui.focus, ui.row, ui.col, ui.sel);
+    let scr = &mut ui.screen;
+    scr.begin();
+
+    draw_board(scr, duel, focus, (row, col), you);
 
     // Menu (bottom), over the field.
     let menu_dim = focus == Focus::Board;
@@ -584,36 +614,54 @@ fn focused_card(duel: &Duel, ui: &Ui, items: &[Item]) -> Option<CardId> {
 const PANEL_W: usize = 24;
 
 /// Draw the card-details panel at the top of the right column. Returns the `y`
-/// of its bottom border (so the hand panel can sit right under it).
+/// of its bottom border (so the hand panel can sit right under it). Spells and
+/// monsters get different layouts (a spell has no ATK/DEF/level — just its text).
 fn draw_card_panel(scr: &mut Screen, id: CardId, duel: &Duel) -> u16 {
     let data = match duel.card_data(id) {
         Some(d) => d,
         None => return R0_Y.saturating_sub(1),
     };
+
+    // Name + type header, shared by both layouts.
     let mut lines: Vec<(String, Color)> = vec![
         (name_of(duel, id).to_string(), Color::White),
         (type_desc(data.card_type), Color::Grey),
-        (format!("ATK {}   DEF {}", data.atk, data.def), Color::Green),
-        (format!("Level {}", data.level), Color::Grey),
-        (
+    ];
+
+    let (title, body_color) = if data.card_type & TYPE_SPELL != 0 {
+        // Spell layout: its effect text, and nothing else. (Normal Spells only.)
+        (" Spell ", Color::White)
+    } else {
+        // Monster layout: the battle numbers.
+        lines.push((format!("ATK {}   DEF {}", data.atk, data.def), Color::Green));
+        lines.push((format!("Level {}", data.level), Color::Grey));
+        lines.push((
             format!(
                 "{} · {}",
                 attribute_name(data.attribute),
                 race_name(data.race)
             ),
             Color::Cyan,
-        ),
-    ];
-    if let Some(pos) = duel.position_of(id) {
-        lines.push((format!("Position: {}", pos_abbr(pos)), pos_color(Some(pos))));
-    }
-    if !data.text.is_empty() {
+        ));
+        if let Some(pos) = duel.position_of(id) {
+            lines.push((format!("Position: {}", pos_abbr(pos)), pos_color(Some(pos))));
+        }
+        (" Monster ", Color::DarkGrey)
+    };
+
+    // Card text (the effect) — the whole point of the spell panel.
+    if data.text.is_empty() {
+        if data.card_type & TYPE_MONSTER == 0 {
+            lines.push(("(no text)".into(), Color::DarkGrey));
+        }
+    } else {
         lines.push((String::new(), Color::Grey));
         for chunk in wrap(&data.text, PANEL_W) {
-            lines.push((chunk, Color::DarkGrey));
+            lines.push((chunk, body_color));
         }
     }
-    draw_panel(scr, R0_Y, " Details ", &lines)
+
+    draw_panel(scr, R0_Y, title, &lines)
 }
 
 /// Draw the hand as a panel below the card panel: each card indexed, with stats.
@@ -845,7 +893,9 @@ fn select_target(duel: &mut Duel, ui: &mut Ui) {
     duel.set_response(&bytes);
 }
 
-/// Show a graveyard's contents (over a blank frame) until a key is pressed.
+/// Inspect a graveyard **without leaving the board**: the field stays drawn, and
+/// the right column shows the highlighted GY card's details (same panel as
+/// everywhere else) above a scrollable list. ↑↓ browse, Esc/Enter return.
 fn view_gy(duel: &Duel, ui: &mut Ui, player: usize) {
     let who = if player == current(duel) {
         "Your"
@@ -853,34 +903,66 @@ fn view_gy(duel: &Duel, ui: &mut Ui, player: usize) {
         "Opponent's"
     };
     let cards = duel.graveyard(player);
+    let you = current(duel);
+    let mut sel = 0usize;
 
-    ui.screen.begin();
-    ui.screen.put_bold(
-        LABEL_X,
-        0,
-        &format!("{who} Graveyard — {} card(s)", cards.len()),
-        Color::White,
-    );
-    if cards.is_empty() {
-        ui.screen.put(LABEL_X, 2, "(empty)", Color::DarkGrey);
-    } else {
-        for (i, &id) in cards.iter().enumerate() {
-            ui.screen.put(
+    loop {
+        {
+            let scr = &mut ui.screen;
+            scr.begin();
+            // Keep the board (no cursor highlight — the GY list has its own).
+            draw_board(scr, duel, Focus::Menu, (0, 0), you);
+
+            // Right column: details of the highlighted GY card, then the list.
+            let mut y = R0_Y;
+            if let Some(&id) = cards.get(sel) {
+                y = draw_card_panel(scr, id, duel) + 1;
+            }
+            draw_gy_panel(scr, duel, &cards, sel, y);
+
+            scr.put_bold(
                 LABEL_X,
-                2 + i as u16,
-                &format!("{}. {}", i + 1, hand_label(duel, id)),
-                Color::Grey,
+                MENU_Y,
+                &format!("▸ {who} Graveyard — {} card(s)", cards.len()),
+                Color::White,
             );
+            scr.put(
+                LABEL_X,
+                MENU_Y + 1,
+                "↑↓ browse · Esc/Enter return · q quit",
+                Color::DarkGrey,
+            );
+            scr.flush(&mut io::stdout());
+        }
+        match read_key() {
+            KeyCode::Up => sel = sel.saturating_sub(1),
+            KeyCode::Down if !cards.is_empty() => sel = (sel + 1).min(cards.len() - 1),
+            KeyCode::Enter | KeyCode::Esc => return,
+            _ => {}
         }
     }
-    ui.screen.put(
-        LABEL_X,
-        4 + cards.len() as u16,
-        "(press any key to return)",
-        Color::DarkGrey,
-    );
-    ui.screen.flush(&mut io::stdout());
-    read_key();
+}
+
+/// The graveyard list panel, with the highlighted card marked.
+fn draw_gy_panel(scr: &mut Screen, duel: &Duel, cards: &[CardId], sel: usize, top_y: u16) {
+    let lines: Vec<(String, Color)> = if cards.is_empty() {
+        vec![("(empty)".into(), Color::DarkGrey)]
+    } else {
+        cards
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| {
+                let marker = if i == sel { "›" } else { " " };
+                let color = if i == sel {
+                    Color::Yellow
+                } else {
+                    Color::White
+                };
+                (format!("{marker} {}", hand_label(duel, id)), color)
+            })
+            .collect()
+    };
+    draw_panel(scr, top_y, " Graveyard ", &lines);
 }
 
 fn game_over(duel: &Duel, ui: &mut Ui) {
