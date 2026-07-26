@@ -1,7 +1,10 @@
 //! The tabletop: where cards physically sit.
 //!
 //! Two views of location:
-//! - `locations` — a card → `(owner, zone)` map: whose zone, and which kind.
+//! - `locations` — a card → `(controller, zone)` map: whose zone it sits in, and
+//!   which kind. The player here is the **controller** (who currently controls
+//!   it), not necessarily the **owner** (whose deck it belongs to) — control can
+//!   move without ownership (e.g. Change of Heart). Ownership lives on the `Card`.
 //! - per-player **ordered** piles (`decks`, `hands`) — where order matters, e.g.
 //!   "draw the top card of player 0's deck".
 //!
@@ -13,7 +16,7 @@ use crate::{ids::CardId, zone::Zone};
 
 #[derive(Debug, Default)]
 pub struct Field {
-    /// Where each card is: its owner and the kind of zone it sits in.
+    /// Where each card is: its **controller** and the kind of zone it sits in.
     locations: BTreeMap<CardId, (usize, Zone)>,
     decks: [Vec<CardId>; 2],
     hands: [Vec<CardId>; 2],
@@ -37,29 +40,35 @@ impl Field {
         self.locations.get(&card).map(|&(_, zone)| zone)
     }
 
-    pub fn owner_of(&self, card: CardId) -> Option<usize> {
-        self.locations.get(&card).map(|&(owner, _)| owner)
+    /// Which player currently **controls** `card` (whose zone it's in). Not
+    /// necessarily its owner — see the module docs.
+    pub fn controller_of(&self, card: CardId) -> Option<usize> {
+        self.locations.get(&card).map(|&(controller, _)| controller)
     }
 
-    /// Move a card to a new zone, keeping its current owner (defaults to player 0
-    /// if the card has no recorded owner yet). Removes it from its OLD per-player
-    /// pile first, so `deck_count`/`hand_count` stay correct (mirrors EDOPro's
-    /// `field::remove_card`, which erases the card from its old zone list).
+    /// Move a card to a new zone, keeping its current controller (defaults to
+    /// player 0 if the card has no recorded location yet). Removes it from its
+    /// OLD per-player pile first, so `deck_count`/`hand_count` stay correct
+    /// (mirrors EDOPro's `field::remove_card`, which erases the card from its old
+    /// zone list).
+    // NOTE: a card leaving the field should return to its *owner's* side (GY,
+    // hand, deck). We keep the controller for now because control never diverges
+    // from ownership yet; revisit when control-changing effects arrive.
     pub fn send_to(&mut self, card: CardId, zone: Zone) {
-        let owner = self.owner_of(card).unwrap_or(0);
+        let controller = self.controller_of(card).unwrap_or(0);
         self.remove_from_pile(card);
-        self.locations.insert(card, (owner, zone));
+        self.locations.insert(card, (controller, zone));
     }
 
     /// If the card currently lives in a per-player ordered pile (deck/hand), pull
     /// it out. Zones without a pile yet (MZONE/SZONE/GY/…) have nothing to erase.
     fn remove_from_pile(&mut self, card: CardId) {
-        let Some(&(owner, zone)) = self.locations.get(&card) else {
+        let Some(&(controller, zone)) = self.locations.get(&card) else {
             return;
         };
         match zone {
-            Zone::Deck => self.decks[owner].retain(|&c| c != card),
-            Zone::Hand => self.hands[owner].retain(|&c| c != card),
+            Zone::Deck => self.decks[controller].retain(|&c| c != card),
+            Zone::Hand => self.hands[controller].retain(|&c| c != card),
             _ => {}
         }
     }
@@ -109,13 +118,18 @@ impl Field {
         self.locations.get(&card) == Some(&(player, zone))
     }
 
-    /// The cards `player` controls in their Monster Zone, in id order
-    /// (`locations` is a `BTreeMap`, so iteration is deterministic).
-    pub fn monster_zone(&self, player: usize) -> Vec<CardId> {
+    /// The cards `player` has in `zone`, in id order (`locations` is a
+    /// `BTreeMap`, so iteration is deterministic).
+    pub fn cards_in(&self, player: usize, zone: Zone) -> Vec<CardId> {
         self.locations
             .iter()
-            .filter(|(_, &(pl, zone))| pl == player && zone == Zone::MonsterZone)
+            .filter(|(_, &(pl, z))| pl == player && z == zone)
             .map(|(&card, _)| card)
             .collect()
+    }
+
+    /// The cards `player` controls in their Monster Zone.
+    pub fn monster_zone(&self, player: usize) -> Vec<CardId> {
+        self.cards_in(player, Zone::MonsterZone)
     }
 }

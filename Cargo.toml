@@ -21,3 +21,6 @@ mlua = { version = "0.12", features = ["lua54", "vendored"] }
 
 [lib]
 name = "cardcrusher"
+
+[dev-dependencies]
+crossterm = "0.29.0"

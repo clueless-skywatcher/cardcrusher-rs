@@ -5,6 +5,7 @@ use crate::card::{Card, CardData};
 use crate::constants::{PLAYER_0, PLAYER_1};
 use crate::ids::CardId;
 use crate::position::Position;
+use crate::reason::{Reason, REASON_DESTROY};
 use crate::zone::Zone;
 
 use super::{Duel, WinReason, Winner};
@@ -59,15 +60,19 @@ impl Duel {
 
     // ===== Deck & hand ======================================================
 
-    /// Create a card and put it on the bottom of a player's deck.
-    pub fn add_to_deck(&mut self, player: usize, card: Card) -> CardId {
+    /// Create a card and put it on the bottom of a player's deck. The card starts
+    /// out **owned and controlled** by that player.
+    pub fn add_to_deck(&mut self, player: usize, mut card: Card) -> CardId {
+        card.owner = player;
         let id = self.cards.insert(card);
         self.field.borrow_mut().add_to_deck(player, id);
         id
     }
 
-    /// Create a card and put it into a player's hand.
-    pub fn add_to_hand(&mut self, player: usize, card: Card) -> CardId {
+    /// Create a card and put it into a player's hand. The card starts out **owned
+    /// and controlled** by that player.
+    pub fn add_to_hand(&mut self, player: usize, mut card: Card) -> CardId {
+        card.owner = player;
         let id = self.cards.insert(card);
         self.field.borrow_mut().add_to_hand(player, id);
         id
@@ -102,6 +107,16 @@ impl Duel {
         self.field.borrow().monster_zone(player)
     }
 
+    /// The cards a player controls in their Spell & Trap Zone.
+    pub fn spell_trap_zone(&self, player: usize) -> Vec<CardId> {
+        self.field.borrow().cards_in(player, Zone::SpellTrapZone)
+    }
+
+    /// The cards in a player's Graveyard.
+    pub fn graveyard(&self, player: usize) -> Vec<CardId> {
+        self.field.borrow().cards_in(player, Zone::GY)
+    }
+
     // ===== Zones & movement =================================================
 
     pub fn place(&mut self, player: usize, card: CardId, zone: Zone) {
@@ -112,8 +127,33 @@ impl Duel {
         self.field.borrow().zone_of(card)
     }
 
+    /// Who currently **controls** `card` — the player whose zone it sits in
+    /// (defaults to player 0 if unplaced). May differ from its owner.
+    pub fn controller_of(&self, card: CardId) -> usize {
+        self.field.borrow().controller_of(card).unwrap_or(0)
+    }
+
+    /// Who **owns** `card` — whose deck it belongs to. Fixed for the card's life;
+    /// unlike control, ownership never changes.
+    pub fn owner_of(&self, card: CardId) -> usize {
+        self.get_card(card).map(|c| c.owner).unwrap_or(0)
+    }
+
     pub fn send_to(&mut self, card: CardId, zone: Zone) {
         self.field.borrow_mut().send_to(card, zone);
+    }
+
+    /// **Destroy** `card` for `reason` (e.g. `REASON_BATTLE`), sending it to the
+    /// GY. Unlike a bare `send_to`, this is the single chokepoint for destruction:
+    /// it records *why* on the card (OR-ing in `REASON_DESTROY`) so that "when
+    /// destroyed by battle/effect" triggers can fire here once the event engine
+    /// exists. (A card merely *sent* to the GY — discarded, tributed — is not
+    /// "destroyed", which is why the two paths are separate.)
+    pub fn destroy(&mut self, card: CardId, reason: Reason) {
+        if let Some(c) = self.cards.get_mut(card) {
+            c.reason = REASON_DESTROY | reason;
+        }
+        self.send_to(card, Zone::GY);
     }
 
     /// Put a card onto the field as a monster, **face-up in attack position**. A
@@ -171,6 +211,11 @@ impl Duel {
     /// Reset the Normal-Summon counter (called at the start of each turn).
     pub(crate) fn reset_normal_summons(&mut self) {
         self.normal_summons = [0, 0];
+    }
+
+    /// Clear the per-turn attack record (called at the start of each turn).
+    pub(crate) fn reset_attacks(&mut self) {
+        self.attacked_this_turn.clear();
     }
 
     /// Set a card face-down in the spell/trap zone. Shared by the menu and card

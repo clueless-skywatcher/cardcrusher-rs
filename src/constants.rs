@@ -23,6 +23,9 @@ pub const MSG_PHASE_END: DuelMessage = 15;
 pub const MSG_SELECT_IDLECMD: DuelMessage = 16;
 /// The Battle-Phase menu — "pick a battle command" (attack, or move on).
 pub const MSG_SELECT_BATTLECMD: DuelMessage = 17;
+/// Choose which opponent monster a declared attack targets (from
+/// `attack_targets`) — distinct from `MSG_SELECT_CARD` (effect targeting).
+pub const MSG_SELECT_ATTACK_TARGET: DuelMessage = 18;
 
 /// A Main-Phase menu command — the first byte of an idle-command response
 /// (`[command, index]`).

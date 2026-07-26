@@ -18,7 +18,7 @@ mod driver;
 mod scripting;
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use mlua::{Lua, Table, Thread};
@@ -55,6 +55,9 @@ pub struct Duel {
     /// The most recently declared attack: `(attacker, target)`, `None` target =
     /// direct. Set by `declare_attack`; B3 will resolve it into damage.
     last_attack: Option<(CardId, Option<CardId>)>,
+    /// Monsters that have already attacked **this turn** (reset at turn start).
+    /// Base rule: one attack per monster — enforced in `attackers`.
+    attacked_this_turn: BTreeSet<CardId>,
     lps: [u32; 2],
     decked_out: [bool; 2],
     result: Option<Winner>,
@@ -112,6 +115,7 @@ impl Duel {
             turn_hist: vec![],
             normal_summons: [0, 0],
             last_attack: None,
+            attacked_this_turn: BTreeSet::new(),
             lps: [8000, 8000],
             decked_out: [false, false],
             result: None,

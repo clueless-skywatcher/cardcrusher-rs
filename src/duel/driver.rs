@@ -117,6 +117,7 @@ impl Duel {
                     self.turn_hist.push(*player);
                     // Fresh turn → each player's Normal Summon is available again.
                     self.reset_normal_summons();
+                    self.reset_attacks();
                 }
                 const PHASES: [DuelMessage; 7] = [
                     MSG_NEW_TURN,
@@ -317,23 +318,25 @@ impl Duel {
                 player,
             } => match step {
                 // Step 0: with opponent monsters, freeze to pick a target;
-                // otherwise it's a direct attack — declare it now.
+                // otherwise it's a direct attack — declare and resolve now.
                 0 => {
                     if self.attack_targets(*player).is_empty() {
                         self.declare_attack(*attacker, None);
+                        self.resolve_battle(*attacker, None);
                         self.reopen_battle_menu(*player);
                         true
                     } else {
-                        self.messages.push(MSG_SELECT_CARD);
+                        self.messages.push(MSG_SELECT_ATTACK_TARGET);
                         *step += 1;
                         false
                     }
                 }
-                // Step 1: the picked target index → declare "attacker vs target".
+                // Step 1: the picked target → declare, then resolve the battle.
                 _ => {
                     let idx = self.responses.first().copied().unwrap_or(0) as usize;
                     let target = self.attack_targets(*player).get(idx).copied();
                     self.declare_attack(*attacker, target);
+                    self.resolve_battle(*attacker, target);
                     self.reopen_battle_menu(*player);
                     true
                 }

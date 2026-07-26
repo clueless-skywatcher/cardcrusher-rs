@@ -253,7 +253,9 @@ impl Duel {
     fn handle_destroys(&mut self) {
         let to_destroy: Vec<CardId> = self.effect_ctx.borrow_mut().to_destroy.drain(..).collect();
         for card in to_destroy {
-            self.send_to(card, Zone::GY);
+            // An effect's `e:destroy` is destruction by effect — same chokepoint
+            // as battle, tagged with its own reason.
+            self.destroy(card, crate::reason::REASON_EFFECT);
         }
     }
 

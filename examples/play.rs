@@ -1,51 +1,75 @@
-//! A tiny terminal harness to *play* the engine.
+//! An interactive terminal harness to *play* the engine.
 //!
-//! Run with:  `cargo run --example play`
+//! Run with:  `cargo run --example play`   (needs a real terminal)
 //!
 //! It's a hotseat: whoever's turn it is acts from this terminal. It drives the
 //! normal `process()` / `Awaiting` / `set_response` loop — the same protocol a
 //! real front-end would use — and renders the board by querying the `Duel`.
 //!
+//! Controls:
+//!   Tab          switch focus between the MENU and the BOARD
+//!   ↑ ↓          move the menu selection (menu focus)
+//!   ↑ ↓ ← →      move the inspection cursor over field slots (board focus)
+//!   Enter        choose the selected menu item / return to the menu
+//!   q            quit
+//!
+//! In board focus, a details panel shows on the right for the card under the
+//! cursor (and nothing when the slot is empty).
+//!
+//! Rendering is **double-buffered**: each frame is composed into an off-screen
+//! cell grid ([`Screen`]), then only the rows that changed since the last frame
+//! are written to the terminal — no full-screen clear, so no flicker.
+//!
 //! Scope note: this exercises what's built (turns, the Main-Phase menu, summon,
-//! and menu-driven effect activation with target selection). No battle, no
-//! chains — those are later phases.
+//! menu-driven effect activation with target selection, and the Battle Phase —
+//! declare an attack, damage calc, direct attacks). No chains — that's later.
 
 use std::io::{self, Write};
 
-use cardcrusher::card::Card;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use crossterm::{cursor, queue, terminal};
+
+use cardcrusher::card::{Card, CardData};
 use cardcrusher::duel::{Duel, Winner};
+use cardcrusher::ids::CardId;
+use cardcrusher::position::Position;
 use cardcrusher::processor::DuelStatus;
 use cardcrusher::zone::Zone;
 use cardcrusher::{
-    CMD_ACTIVATE, CMD_NEXT_PHASE, CMD_SUMMON, MSG_NEW_TURN, MSG_PHASE_BATTLE, MSG_PHASE_DRAW,
-    MSG_PHASE_END, MSG_PHASE_MAIN1, MSG_PHASE_MAIN2, MSG_PHASE_STANDBY, MSG_SELECT_CARD,
-    MSG_SELECT_IDLECMD, MSG_STARTUP,
+    CMD_ACTIVATE, CMD_ATTACK, CMD_NEXT_PHASE, CMD_SUMMON, MSG_NEW_TURN, MSG_PHASE_BATTLE,
+    MSG_PHASE_DRAW, MSG_PHASE_END, MSG_PHASE_MAIN1, MSG_PHASE_MAIN2, MSG_PHASE_STANDBY,
+    MSG_SELECT_ATTACK_TARGET, MSG_SELECT_BATTLECMD, MSG_SELECT_CARD, MSG_SELECT_IDLECMD,
+    MSG_STARTUP,
 };
 
 fn main() {
     let mut duel = setup();
     duel.start();
-    let mut seen = 0usize; // how many outbox messages we've already printed
 
-    println!("\n=== cardcrusher — hotseat demo ===");
-
-    loop {
-        let status = duel.process();
-        print_new_messages(&duel, &mut seen);
-
-        match status {
-            DuelStatus::End => {
-                announce_result(&duel);
-                break;
+    {
+        let _guard = TerminalGuard::new();
+        let mut ui = Ui::new();
+        loop {
+            match duel.process() {
+                DuelStatus::End => break,
+                // process() only ever returns Awaiting or End at the top level.
+                _ => match duel.messages().last().copied() {
+                    Some(MSG_SELECT_IDLECMD) => main_phase_menu(&mut duel, &mut ui),
+                    Some(MSG_SELECT_BATTLECMD) => battle_phase_menu(&mut duel, &mut ui),
+                    Some(MSG_SELECT_ATTACK_TARGET) => select_attack_target(&mut duel, &mut ui),
+                    Some(MSG_SELECT_CARD) => select_target(&mut duel, &mut ui),
+                    _ => duel.set_response(&[0]), // shouldn't happen; keep moving
+                },
             }
-            // process() only ever returns Awaiting or End at the top level.
-            _ => match duel.messages().last().copied() {
-                Some(MSG_SELECT_IDLECMD) => main_phase_menu(&mut duel),
-                Some(MSG_SELECT_CARD) => select_target(&mut duel),
-                _ => duel.set_response(&[0]), // shouldn't happen; keep moving
-            },
         }
-    }
+        game_over(&duel, &mut ui);
+    } // guard drops here → terminal restored
+
+    announce_result(&duel);
 }
 
 /// A fixed opening position: player 0 holds the Example spell + a monster to
@@ -56,21 +80,219 @@ fn setup() -> Duel {
     duel.load_card("cards/Example.lua")
         .expect("cards/Example.lua should load");
 
-    // A mix of named monsters, so drawn/summoned cards are clearly different.
-    let deck = [1001u32, 1002, 1003, 1004];
+    // (code, ATK, DEF) — real-ish stats so the Battle Phase actually decides.
+    let deck = [
+        (1001u32, 300, 200), // Kuriboh
+        (1002, 1200, 1500),  // Beaver Warrior
+        (1003, 1300, 1400),  // Feral Imp
+        (1004, 800, 2000),   // Mystical Elf — a defensive wall
+    ];
     for i in 0..8 {
-        duel.add_to_deck(0, Card::new(deck[i % deck.len()]));
-        duel.add_to_deck(1, Card::new(deck[(i + 1) % deck.len()]));
+        let (c, a, d) = deck[i % deck.len()];
+        duel.add_to_deck(0, mon(c, a, d));
+        let (c, a, d) = deck[(i + 1) % deck.len()];
+        duel.add_to_deck(1, mon(c, a, d));
     }
     duel.add_to_hand(0, Card::new(12345678)); // Example Spell
-    duel.add_to_hand(0, Card::new(1001)); // Kuriboh — a monster to summon
+    duel.add_to_hand(0, mon(1003, 1300, 1400)); // Feral Imp — a monster to summon
 
-    let foe = duel.add_card(Card::new(1002)); // Beaver Warrior on the opponent's field
+    let foe = duel.add_card(mon(1002, 1200, 1500)); // Beaver Warrior on the foe's field
     duel.place(1, foe, Zone::MonsterZone);
     duel
 }
 
-// ===== Rendering =========================================================
+/// A vanilla monster with the given code and ATK/DEF (the demo's shortcut for a
+/// card definition; real cards declare this in their `.lua` script). We stamp a
+/// plausible type/level so the details panel has something to show.
+fn mon(code: u32, atk: i32, def: i32) -> Card {
+    Card::with_data(
+        code,
+        CardData {
+            card_type: 0x1 | 0x10, // TYPE_MONSTER | TYPE_NORMAL
+            atk,
+            def,
+            level: 4,
+            ..Default::default()
+        },
+    )
+}
+
+/// Whose turn it is right now (the player acting at a prompt).
+fn current(duel: &Duel) -> usize {
+    *duel.turn_history().last().unwrap_or(&0)
+}
+
+// ===== Double-buffered screen ============================================
+
+#[derive(Clone, Copy, PartialEq)]
+struct Cell {
+    ch: char,
+    fg: Color,
+    bold: bool,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Cell {
+            ch: ' ',
+            fg: Color::Reset,
+            bold: false,
+        }
+    }
+}
+
+/// An off-screen character grid. Draw a whole frame into `cur`, then `flush`
+/// writes only the rows that differ from the previously shown frame (`prev`).
+struct Screen {
+    w: usize,
+    h: usize,
+    cur: Vec<Cell>,
+    prev: Vec<Cell>,
+}
+
+impl Screen {
+    fn new() -> Self {
+        let (w, h) = terminal::size().unwrap_or((100, 40));
+        let (w, h) = (w as usize, h.max(30) as usize);
+        Screen {
+            w,
+            h,
+            cur: vec![Cell::default(); w * h],
+            // A sentinel that no real cell equals, so the first flush draws all.
+            prev: vec![
+                Cell {
+                    ch: '\0',
+                    ..Cell::default()
+                };
+                w * h
+            ],
+        }
+    }
+
+    /// Blank the working buffer for a fresh frame.
+    fn begin(&mut self) {
+        self.cur.iter_mut().for_each(|c| *c = Cell::default());
+    }
+
+    fn put(&mut self, x: u16, y: u16, s: &str, fg: Color) {
+        self.put_styled(x, y, s, fg, false);
+    }
+
+    fn put_bold(&mut self, x: u16, y: u16, s: &str, fg: Color) {
+        self.put_styled(x, y, s, fg, true);
+    }
+
+    fn put_styled(&mut self, x: u16, y: u16, s: &str, fg: Color, bold: bool) {
+        let (x, y) = (x as usize, y as usize);
+        if y >= self.h {
+            return;
+        }
+        for (i, ch) in s.chars().enumerate() {
+            let cx = x + i;
+            if cx >= self.w {
+                break;
+            }
+            self.cur[y * self.w + cx] = Cell { ch, fg, bold };
+        }
+    }
+
+    /// Write only the changed rows to the terminal, grouping equal-style runs.
+    fn flush(&mut self, out: &mut impl Write) {
+        for y in 0..self.h {
+            let row = &self.cur[y * self.w..(y + 1) * self.w];
+            if row == &self.prev[y * self.w..(y + 1) * self.w] {
+                continue; // unchanged → don't touch it (this is what kills flicker)
+            }
+            let _ = queue!(out, cursor::MoveTo(0, y as u16));
+            let mut i = 0;
+            while i < self.w {
+                let cell = row[i];
+                let mut j = i + 1;
+                while j < self.w && row[j].fg == cell.fg && row[j].bold == cell.bold {
+                    j += 1;
+                }
+                let run: String = row[i..j].iter().map(|c| c.ch).collect();
+                let _ = queue!(out, SetForegroundColor(cell.fg));
+                if cell.bold {
+                    let _ = queue!(out, SetAttribute(Attribute::Bold));
+                }
+                let _ = queue!(out, Print(run));
+                if cell.bold {
+                    let _ = queue!(out, SetAttribute(Attribute::Reset));
+                }
+                i = j;
+            }
+            let _ = queue!(out, ResetColor);
+        }
+        let _ = out.flush();
+        self.prev.clone_from(&self.cur);
+    }
+}
+
+// ===== UI state ==========================================================
+
+#[derive(Default, Clone, Copy, PartialEq)]
+enum Focus {
+    #[default]
+    Menu,
+    Board,
+}
+
+struct Ui {
+    focus: Focus,
+    /// Inspection cursor over the four field rows (0..4) × five columns (0..5).
+    row: usize,
+    col: usize,
+    /// Selected menu item.
+    sel: usize,
+    screen: Screen,
+}
+
+impl Ui {
+    fn new() -> Self {
+        Ui {
+            focus: Focus::default(),
+            row: 0,
+            col: 0,
+            sel: 0,
+            screen: Screen::new(),
+        }
+    }
+}
+
+/// A menu choice: send a response to the engine, or a local view.
+enum Act {
+    Respond(Vec<u8>),
+    ViewGy(usize),
+}
+
+struct Item {
+    label: String,
+    act: Act,
+    /// The card this item is *about*, if any — used to show its details when the
+    /// item is highlighted, and to trigger it by selecting that card on the board.
+    card: Option<CardId>,
+}
+
+/// An item with no associated card (e.g. "next phase", "view graveyard").
+fn respond(label: impl Into<String>, bytes: Vec<u8>) -> Item {
+    Item {
+        label: label.into(),
+        act: Act::Respond(bytes),
+        card: None,
+    }
+}
+
+/// An item that acts on `card` — hoverable for details, selectable on the board.
+fn respond_card(label: impl Into<String>, bytes: Vec<u8>, card: CardId) -> Item {
+    Item {
+        label: label.into(),
+        act: Act::Respond(bytes),
+        card: Some(card),
+    }
+}
+
+// ===== Card naming & flag decoding =======================================
 
 fn card_name(code: u32) -> &'static str {
     match code {
@@ -85,24 +307,383 @@ fn card_name(code: u32) -> &'static str {
     }
 }
 
-/// The Example Spell is our only Spell; everything else in the demo is a
-/// summonable monster.
+/// The Example Spell is our only Spell; everything else in the demo is a monster.
 fn is_monster(code: u32) -> bool {
     code != 12345678
 }
 
-fn name_of(duel: &Duel, id: cardcrusher::ids::CardId) -> &'static str {
+fn name_of(duel: &Duel, id: CardId) -> &'static str {
     card_name(duel.get_card(id).map(|c| c.code).unwrap_or(0))
 }
 
-fn print_new_messages(duel: &Duel, seen: &mut usize) {
-    let msgs = duel.messages();
-    for &m in &msgs[*seen..] {
-        if let Some(label) = phase_label(m) {
-            println!("── {label} ──");
+fn pos_abbr(pos: Position) -> &'static str {
+    match pos {
+        Position::FaceUpAttack => "ATK",
+        Position::FaceUpDefense => "DEF",
+        Position::FaceDownDefense => "SET",
+        Position::FaceDownAttack => "f.d.ATK",
+    }
+}
+
+/// Border colour for a slot by the monster's position (empty → dim).
+fn pos_color(slot: Option<Position>) -> Color {
+    match slot {
+        Some(Position::FaceUpAttack) => Color::Red,
+        Some(Position::FaceUpDefense) => Color::Cyan,
+        Some(Position::FaceDownDefense) => Color::Grey,
+        Some(Position::FaceDownAttack) => Color::DarkYellow,
+        None => Color::DarkGrey,
+    }
+}
+
+fn type_desc(t: u32) -> String {
+    if t == 0 {
+        return "—".into();
+    }
+    let mut parts = Vec::new();
+    for (bit, word) in [
+        (0x10u32, "Normal"),
+        (0x20, "Effect"),
+        (0x40, "Fusion"),
+        (0x80, "Ritual"),
+        (0x2000, "Synchro"),
+        (0x800000, "Xyz"),
+        (0x1000000, "Pendulum"),
+        (0x4000000, "Link"),
+    ] {
+        if t & bit != 0 {
+            parts.push(word);
         }
     }
-    *seen = msgs.len();
+    parts.push(if t & 0x1 != 0 {
+        "Monster"
+    } else if t & 0x2 != 0 {
+        "Spell"
+    } else if t & 0x4 != 0 {
+        "Trap"
+    } else {
+        "Card"
+    });
+    parts.join(" ")
+}
+
+fn attribute_name(a: u32) -> &'static str {
+    match a {
+        0x01 => "EARTH",
+        0x02 => "WATER",
+        0x04 => "FIRE",
+        0x08 => "WIND",
+        0x10 => "LIGHT",
+        0x20 => "DARK",
+        0x40 => "DIVINE",
+        _ => "—",
+    }
+}
+
+fn race_name(r: u64) -> &'static str {
+    match r {
+        0x1 => "Warrior",
+        0x2 => "Spellcaster",
+        0x4 => "Fairy",
+        0x8 => "Fiend",
+        0x10 => "Zombie",
+        0x20 => "Machine",
+        0x2000 => "Dragon",
+        0x4000 => "Beast",
+        0x8000 => "Beast-Warrior",
+        _ => "—",
+    }
+}
+
+// ===== Layout ============================================================
+
+const CELL_W: usize = 9; // inner width of a card cell
+const CELL_TW: u16 = CELL_W as u16 + 2; // with borders
+const GAP: u16 = 1;
+const LABEL_X: u16 = 1;
+const BOARD_X: u16 = 5; // x of the first cell (row labels sit to the left)
+
+const TITLE_Y: u16 = 0;
+const OPP_HDR_Y: u16 = 1;
+const R0_Y: u16 = 2; // opponent S/T
+const R1_Y: u16 = 6; // opponent Monsters
+const DIV_Y: u16 = 10;
+const R2_Y: u16 = 11; // your Monsters
+const R3_Y: u16 = 15; // your S/T
+const YOU_HDR_Y: u16 = 19;
+const MENU_Y: u16 = 21;
+const PANEL_X: u16 = BOARD_X + 5 * CELL_TW + 4 * GAP + 2;
+
+/// The four navigable field rows, from `you`'s view (top → bottom).
+fn nav_rows(you: usize) -> [(usize, Zone, u16, &'static str); 4] {
+    let opp = 1 - you;
+    [
+        (opp, Zone::SpellTrapZone, R0_Y, "S/T"),
+        (opp, Zone::MonsterZone, R1_Y, "Mon"),
+        (you, Zone::MonsterZone, R2_Y, "Mon"),
+        (you, Zone::SpellTrapZone, R3_Y, "S/T"),
+    ]
+}
+
+fn zone_cards(duel: &Duel, player: usize, zone: Zone) -> Vec<CardId> {
+    match zone {
+        Zone::MonsterZone => duel.monster_zone(player),
+        Zone::SpellTrapZone => duel.spell_trap_zone(player),
+        Zone::GY => duel.graveyard(player),
+        _ => Vec::new(),
+    }
+}
+
+fn cell_x(col: usize) -> u16 {
+    BOARD_X + col as u16 * (CELL_TW + GAP)
+}
+
+/// The card the inspection cursor is currently over, if any.
+fn card_under_cursor(duel: &Duel, ui: &Ui, you: usize) -> Option<CardId> {
+    let (player, zone, _, _) = nav_rows(you)[ui.row];
+    zone_cards(duel, player, zone).get(ui.col).copied()
+}
+
+// ===== Rendering (into the Screen buffer) ================================
+
+/// Pad/truncate a string to exactly `w` chars.
+fn fit(s: &str, w: usize) -> String {
+    let t: String = s.chars().take(w).collect();
+    let pad = w - t.chars().count();
+    format!("{t}{}", " ".repeat(pad))
+}
+
+fn draw_cell(scr: &mut Screen, x: u16, y: u16, duel: &Duel, slot: Option<CardId>, hi: bool) {
+    let color = if hi {
+        Color::Yellow
+    } else {
+        pos_color(slot.and_then(|id| duel.position_of(id)))
+    };
+    let bar = "─".repeat(CELL_W);
+    let (l1, l2) = match slot {
+        Some(id) => {
+            let stats = match (duel.atk_of(id), duel.def_of(id)) {
+                (Some(a), Some(d)) => format!("{a}/{d}"),
+                _ => String::new(),
+            };
+            (fit(name_of(duel, id), CELL_W), fit(&stats, CELL_W))
+        }
+        None => (fit("", CELL_W), fit("    ·", CELL_W)),
+    };
+    scr.put(x, y, &format!("┌{bar}┐"), color);
+    scr.put(x, y + 1, &format!("│{l1}│"), color);
+    scr.put(x, y + 2, &format!("│{l2}│"), color);
+    scr.put(x, y + 3, &format!("└{bar}┘"), color);
+}
+
+fn draw_header(scr: &mut Screen, y: u16, duel: &Duel, player: usize, label: &str) {
+    let lp = duel.life_points(player);
+    let lp_color = if lp <= 2000 { Color::Red } else { Color::Green };
+    scr.put_bold(LABEL_X, y, &format!("{label:<9}"), Color::White);
+    scr.put(LABEL_X + 10, y, "LP ", Color::Grey);
+    scr.put_bold(LABEL_X + 13, y, &format!("{lp:>5}"), lp_color);
+    scr.put(
+        LABEL_X + 20,
+        y,
+        &format!(
+            "Deck {}   Hand {}   GY {}",
+            duel.deck_count(player),
+            duel.hand_count(player),
+            duel.graveyard(player).len(),
+        ),
+        Color::Grey,
+    );
+}
+
+fn render(duel: &Duel, ui: &mut Ui, title: &str, items: &[Item]) {
+    let you = current(duel);
+    let focused = focused_card(duel, ui, items);
+    let (focus, row, col, sel) = (ui.focus, ui.row, ui.col, ui.sel);
+    let scr = &mut ui.screen;
+    scr.begin();
+
+    scr.put_bold(
+        LABEL_X,
+        TITLE_Y,
+        &format!(
+            "Turn {} — Player {you} — {}",
+            duel.turn_history().len(),
+            current_phase_label(duel),
+        ),
+        Color::White,
+    );
+    let (focus_txt, focus_col) = match focus {
+        Focus::Menu => ("[MENU]  Tab→board", Color::Cyan),
+        Focus::Board => ("[BOARD] Tab→menu", Color::Yellow),
+    };
+    scr.put(PANEL_X, TITLE_Y, focus_txt, focus_col);
+
+    let opp = 1 - you;
+    draw_header(scr, OPP_HDR_Y, duel, opp, "Opponent");
+    for (ri, (player, zone, y, label)) in nav_rows(you).into_iter().enumerate() {
+        scr.put(LABEL_X, y + 1, label, Color::DarkGrey);
+        let cards = zone_cards(duel, player, zone);
+        for c in 0..5 {
+            let hi = focus == Focus::Board && row == ri && col == c;
+            draw_cell(scr, cell_x(c), y, duel, cards.get(c).copied(), hi);
+        }
+        if y == R1_Y {
+            scr.put(LABEL_X, DIV_Y, &"─".repeat(60), Color::DarkGrey);
+        }
+    }
+    draw_header(scr, YOU_HDR_Y, duel, you, "You");
+
+    // Menu (bottom), over the field.
+    let menu_dim = focus == Focus::Board;
+    scr.put_bold(
+        LABEL_X,
+        MENU_Y,
+        &format!("▸ {title}"),
+        if menu_dim {
+            Color::DarkGrey
+        } else {
+            Color::White
+        },
+    );
+    for (i, item) in items.iter().enumerate() {
+        let y = MENU_Y + 1 + i as u16;
+        let (marker, color) = match (i == sel, menu_dim) {
+            (true, false) => ("›", Color::Yellow),
+            (true, true) => ("·", Color::Grey),
+            _ => (" ", Color::White),
+        };
+        scr.put(LABEL_X, y, &format!("{marker} {}", item.label), color);
+    }
+    scr.put(
+        LABEL_X,
+        MENU_Y + 2 + items.len() as u16,
+        "Tab focus · ↑↓ move · Enter select · q quit",
+        Color::DarkGrey,
+    );
+
+    // Right column: the focused card's details (if any), then the hand below it.
+    let mut y = R0_Y;
+    if let Some(id) = focused {
+        y = draw_card_panel(scr, id, duel) + 1;
+    }
+    draw_hand_panel(scr, duel, you, y);
+
+    scr.flush(&mut io::stdout());
+}
+
+/// The card whose details the right panel should show: the slot under the
+/// inspection cursor (board focus), or the card the selected menu item is about
+/// (menu focus). `None` → no card panel.
+fn focused_card(duel: &Duel, ui: &Ui, items: &[Item]) -> Option<CardId> {
+    match ui.focus {
+        Focus::Board => card_under_cursor(duel, ui, current(duel)),
+        Focus::Menu => items.get(ui.sel).and_then(|it| it.card),
+    }
+}
+
+const PANEL_W: usize = 24;
+
+/// Draw the card-details panel at the top of the right column. Returns the `y`
+/// of its bottom border (so the hand panel can sit right under it).
+fn draw_card_panel(scr: &mut Screen, id: CardId, duel: &Duel) -> u16 {
+    let data = match duel.card_data(id) {
+        Some(d) => d,
+        None => return R0_Y.saturating_sub(1),
+    };
+    let mut lines: Vec<(String, Color)> = vec![
+        (name_of(duel, id).to_string(), Color::White),
+        (type_desc(data.card_type), Color::Grey),
+        (format!("ATK {}   DEF {}", data.atk, data.def), Color::Green),
+        (format!("Level {}", data.level), Color::Grey),
+        (
+            format!(
+                "{} · {}",
+                attribute_name(data.attribute),
+                race_name(data.race)
+            ),
+            Color::Cyan,
+        ),
+    ];
+    if let Some(pos) = duel.position_of(id) {
+        lines.push((format!("Position: {}", pos_abbr(pos)), pos_color(Some(pos))));
+    }
+    if !data.text.is_empty() {
+        lines.push((String::new(), Color::Grey));
+        for chunk in wrap(&data.text, PANEL_W) {
+            lines.push((chunk, Color::DarkGrey));
+        }
+    }
+    draw_panel(scr, R0_Y, " Details ", &lines)
+}
+
+/// Draw the hand as a panel below the card panel: each card indexed, with stats.
+fn draw_hand_panel(scr: &mut Screen, duel: &Duel, you: usize, top_y: u16) {
+    let cards: Vec<CardId> = (0..duel.hand_count(you))
+        .filter_map(|i| duel.hand_card(you, i))
+        .collect();
+    let lines: Vec<(String, Color)> = if cards.is_empty() {
+        vec![("(empty)".into(), Color::DarkGrey)]
+    } else {
+        cards
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (format!("[{i}] {}", hand_label(duel, id)), Color::White))
+            .collect()
+    };
+    draw_panel(scr, top_y, " Hand ", &lines);
+}
+
+/// Draw a titled box at `(PANEL_X, top_y)` with the given lines. Returns the `y`
+/// of the bottom border.
+fn draw_panel(scr: &mut Screen, top_y: u16, title: &str, lines: &[(String, Color)]) -> u16 {
+    let bar = "─".repeat(PANEL_W);
+    scr.put(PANEL_X, top_y, &format!("┌{bar}┐"), Color::DarkGrey);
+    scr.put(PANEL_X + 2, top_y, title, Color::Grey); // title overlays the border
+    for (i, (text, color)) in lines.iter().enumerate() {
+        let y = top_y + 1 + i as u16;
+        scr.put(PANEL_X, y, "│", Color::DarkGrey);
+        scr.put(PANEL_X + 1, y, &fit(text, PANEL_W), *color);
+        scr.put(PANEL_X + 1 + PANEL_W as u16, y, "│", Color::DarkGrey);
+    }
+    let bottom = top_y + 1 + lines.len() as u16;
+    scr.put(PANEL_X, bottom, &format!("└{bar}┘"), Color::DarkGrey);
+    bottom
+}
+
+/// Wrap `s` into lines of at most `w` chars (whitespace-aware, best effort).
+fn wrap(s: &str, w: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in s.split_whitespace() {
+        if line.chars().count() + word.chars().count() + 1 > w && !line.is_empty() {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+fn hand_label(duel: &Duel, id: CardId) -> String {
+    let code = duel.get_card(id).map(|c| c.code).unwrap_or(0);
+    let name = card_name(code);
+    match (is_monster(code), duel.atk_of(id), duel.def_of(id)) {
+        (true, Some(a), Some(d)) => format!("{name} ({a}/{d})"),
+        _ => name.to_string(),
+    }
+}
+
+fn current_phase_label(duel: &Duel) -> &'static str {
+    duel.messages()
+        .iter()
+        .rev()
+        .find_map(|&m| phase_label(m))
+        .unwrap_or("…")
 }
 
 fn phase_label(m: u8) -> Option<&'static str> {
@@ -115,119 +696,264 @@ fn phase_label(m: u8) -> Option<&'static str> {
         MSG_PHASE_BATTLE => "Battle Phase",
         MSG_PHASE_MAIN2 => "Main Phase 2",
         MSG_PHASE_END => "End Phase",
-        _ => return None, // MSG_SELECT_* are prompts, not phases
+        _ => return None,
     })
 }
 
-fn show_board(duel: &Duel, player: usize) {
-    let opp = 1 - player;
-    let cards = |ids: Vec<cardcrusher::ids::CardId>| {
-        if ids.is_empty() {
-            "(empty)".to_string()
-        } else {
-            ids.iter()
-                .map(|&id| name_of(duel, id))
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
-    };
-    let hand = (0..duel.hand_count(player))
-        .filter_map(|i| duel.hand_card(player, i))
-        .map(|id| name_of(duel, id))
-        .collect::<Vec<_>>()
-        .join(", ");
+// ===== Input loop ========================================================
 
-    println!(
-        "\n┌─ Player {player}'s turn ─ LP {} vs {} ─┐",
-        duel.life_points(player),
-        duel.life_points(opp)
-    );
-    println!("│ Opponent field: {}", cards(duel.monster_zone(opp)));
-    println!("│ Your field:     {}", cards(duel.monster_zone(player)));
-    println!(
-        "│ Your hand:      {}",
-        if hand.is_empty() {
-            "(empty)".into()
-        } else {
-            hand
+/// Render the board + menu and drive input until the player picks a real action.
+/// Returns the response bytes to hand to the engine. Tab toggles board/menu
+/// focus; board focus just inspects (with the details panel).
+fn run_menu(duel: &mut Duel, ui: &mut Ui, title: &str, items: &[Item]) -> Vec<u8> {
+    if items.is_empty() {
+        return vec![0];
+    }
+    ui.sel = ui.sel.min(items.len() - 1);
+    loop {
+        render(duel, ui, title, items);
+        match read_key() {
+            KeyCode::Tab => {
+                ui.focus = match ui.focus {
+                    Focus::Menu => Focus::Board,
+                    Focus::Board => Focus::Menu,
+                }
+            }
+            code => match ui.focus {
+                Focus::Menu => match code {
+                    KeyCode::Up => ui.sel = ui.sel.saturating_sub(1),
+                    KeyCode::Down => ui.sel = (ui.sel + 1).min(items.len() - 1),
+                    KeyCode::Enter => match &items[ui.sel].act {
+                        Act::Respond(bytes) => return bytes.clone(),
+                        Act::ViewGy(p) => view_gy(duel, ui, *p),
+                    },
+                    _ => {}
+                },
+                Focus::Board => match code {
+                    KeyCode::Up => ui.row = ui.row.saturating_sub(1),
+                    KeyCode::Down => ui.row = (ui.row + 1).min(3),
+                    KeyCode::Left => ui.col = ui.col.saturating_sub(1),
+                    KeyCode::Right => ui.col = (ui.col + 1).min(4),
+                    // Enter on a slot: if a menu item is about that card (e.g. an
+                    // attacker or an attack target), pick it right from the board.
+                    KeyCode::Enter => {
+                        let picked = card_under_cursor(duel, ui, current(duel))
+                            .and_then(|card| item_for_card(items, card));
+                        match picked {
+                            Some(bytes) => return bytes,
+                            None => ui.focus = Focus::Menu, // nothing to do here
+                        }
+                    }
+                    KeyCode::Esc => ui.focus = Focus::Menu,
+                    _ => {}
+                },
+            },
         }
-    );
-    println!("└{}", "─".repeat(30));
+    }
 }
 
-// ===== Prompts ===========================================================
+/// The response bytes of the menu item that acts on `card`, if any — the bridge
+/// from "a card selected on the board" to "the matching menu action".
+fn item_for_card(items: &[Item], card: CardId) -> Option<Vec<u8>> {
+    items.iter().find_map(|it| match (&it.act, it.card) {
+        (Act::Respond(bytes), Some(c)) if c == card => Some(bytes.clone()),
+        _ => None,
+    })
+}
 
-fn main_phase_menu(duel: &mut Duel) {
-    let player = *duel.turn_history().last().unwrap_or(&0);
-    show_board(duel, player);
+/// The two graveyards, offered as inspectable public zones in idle menus.
+fn view_items(you: usize) -> Vec<Item> {
+    let opp = 1 - you;
+    vec![
+        Item {
+            label: "View your Graveyard".into(),
+            act: Act::ViewGy(you),
+            card: None,
+        },
+        Item {
+            label: "View opponent's Graveyard".into(),
+            act: Act::ViewGy(opp),
+            card: None,
+        },
+    ]
+}
 
-    // Build the option list: (label, response bytes).
-    let mut options: Vec<(String, Vec<u8>)> =
-        vec![("Go to next phase".into(), vec![CMD_NEXT_PHASE])];
+fn main_phase_menu(duel: &mut Duel, ui: &mut Ui) {
+    let you = current(duel);
+    let mut items = vec![respond("Go to next phase", vec![CMD_NEXT_PHASE])];
 
-    // Summon: monster (code 0) cards in hand.
-    for i in 0..duel.hand_count(player) {
-        if let Some(id) = duel.hand_card(player, i) {
+    for i in 0..duel.hand_count(you) {
+        if let Some(id) = duel.hand_card(you, i) {
             if duel.get_card(id).map(|c| c.code).is_some_and(is_monster) {
-                options.push((
+                items.push(respond_card(
                     format!("Summon {}", name_of(duel, id)),
                     vec![CMD_SUMMON, i as u8],
+                    id,
                 ));
             }
         }
     }
-    // Activate: whatever the engine says is activatable right now.
-    for (opt, (card, _slot)) in duel.activatable_effects(player).into_iter().enumerate() {
-        options.push((
+    for (opt, (card, _slot)) in duel.activatable_effects(you).into_iter().enumerate() {
+        items.push(respond_card(
             format!("Activate {}", name_of(duel, card)),
             vec![CMD_ACTIVATE, opt as u8],
+            card,
         ));
     }
+    items.extend(view_items(you));
 
-    println!("\nChoose an action:");
-    for (i, (label, _)) in options.iter().enumerate() {
-        println!("  [{i}] {label}");
-    }
-    let choice = read_index("Action", options.len());
-    let response = options[choice].1.clone();
-    duel.set_response(&response);
+    let bytes = run_menu(duel, ui, "Main Phase", &items);
+    duel.set_response(&bytes);
 }
 
-fn select_target(duel: &mut Duel) {
-    let cands = duel.candidates();
-    println!("\nPick a target:");
-    for (i, &id) in cands.iter().enumerate() {
-        println!("  [{i}] {}", name_of(duel, id));
+fn battle_phase_menu(duel: &mut Duel, ui: &mut Ui) {
+    let you = current(duel);
+    let mut items = vec![respond("End Battle Phase", vec![CMD_NEXT_PHASE])];
+    for (i, atk) in duel.attackers(you).into_iter().enumerate() {
+        items.push(respond_card(
+            format!("Attack with {}", name_of(duel, atk)),
+            vec![CMD_ATTACK, i as u8],
+            atk,
+        ));
     }
-    let choice = read_index("Target", cands.len().max(1));
-    duel.set_response(&[choice as u8]);
+    items.extend(view_items(you));
+
+    let bytes = run_menu(duel, ui, "Battle Phase", &items);
+    duel.set_response(&bytes);
+}
+
+fn select_attack_target(duel: &mut Duel, ui: &mut Ui) {
+    let you = current(duel);
+    let items: Vec<Item> = duel
+        .attack_targets(you)
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| respond_card(name_of(duel, id), vec![i as u8], id))
+        .collect();
+    let bytes = run_menu(duel, ui, "Attack which monster?", &items);
+    duel.set_response(&bytes);
+}
+
+fn select_target(duel: &mut Duel, ui: &mut Ui) {
+    let items: Vec<Item> = duel
+        .candidates()
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| respond_card(name_of(duel, id), vec![i as u8], id))
+        .collect();
+    let bytes = run_menu(duel, ui, "Pick a target", &items);
+    duel.set_response(&bytes);
+}
+
+/// Show a graveyard's contents (over a blank frame) until a key is pressed.
+fn view_gy(duel: &Duel, ui: &mut Ui, player: usize) {
+    let who = if player == current(duel) {
+        "Your"
+    } else {
+        "Opponent's"
+    };
+    let cards = duel.graveyard(player);
+
+    ui.screen.begin();
+    ui.screen.put_bold(
+        LABEL_X,
+        0,
+        &format!("{who} Graveyard — {} card(s)", cards.len()),
+        Color::White,
+    );
+    if cards.is_empty() {
+        ui.screen.put(LABEL_X, 2, "(empty)", Color::DarkGrey);
+    } else {
+        for (i, &id) in cards.iter().enumerate() {
+            ui.screen.put(
+                LABEL_X,
+                2 + i as u16,
+                &format!("{}. {}", i + 1, hand_label(duel, id)),
+                Color::Grey,
+            );
+        }
+    }
+    ui.screen.put(
+        LABEL_X,
+        4 + cards.len() as u16,
+        "(press any key to return)",
+        Color::DarkGrey,
+    );
+    ui.screen.flush(&mut io::stdout());
+    read_key();
+}
+
+fn game_over(duel: &Duel, ui: &mut Ui) {
+    render(duel, ui, &result_text(duel), &[]);
+    ui.screen.put_bold(
+        LABEL_X,
+        MENU_Y,
+        &format!("▸ {}  (press any key to exit)", result_text(duel)),
+        Color::Yellow,
+    );
+    ui.screen.flush(&mut io::stdout());
+    read_key();
 }
 
 fn announce_result(duel: &Duel) {
+    println!("{}", result_text(duel));
+}
+
+fn result_text(duel: &Duel) -> String {
     match duel.result() {
-        Some(Winner::Player(p)) => {
-            println!("\n🏆 Player {p} wins — {:?}", duel.win_reason());
-        }
-        Some(Winner::Draw) => println!("\n🤝 It's a draw."),
-        None => println!("\nGame over."),
+        Some(Winner::Player(p)) => format!("Player {p} wins — {:?}", duel.win_reason()),
+        Some(Winner::Draw) => "It's a draw.".into(),
+        None => "Game over.".into(),
     }
 }
 
-// ===== Input =============================================================
+// ===== Terminal setup / input ============================================
 
-/// Read an index in `0..count` from stdin, re-prompting on bad input.
-fn read_index(what: &str, count: usize) -> usize {
+/// Enters raw mode + the alternate screen on creation, and restores the terminal
+/// on drop — so a normal return (or a panic) always leaves the terminal sane.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn new() -> Self {
+        enable_raw_mode().expect("enable raw mode");
+        let mut out = io::stdout();
+        let _ = queue!(out, EnterAlternateScreen, cursor::Hide);
+        let _ = out.flush();
+        TerminalGuard
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let mut out = io::stdout();
+        let _ = queue!(out, cursor::Show, LeaveAlternateScreen);
+        let _ = out.flush();
+        let _ = disable_raw_mode();
+    }
+}
+
+/// Block for the next key press. `q` and Ctrl-C quit the whole demo.
+fn read_key() -> KeyCode {
     loop {
-        print!("{what} [0-{}]: ", count.saturating_sub(1));
-        io::stdout().flush().ok();
-
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
-            std::process::exit(0); // EOF (e.g. piped input ended) → quit cleanly
-        }
-        match line.trim().parse::<usize>() {
-            Ok(n) if n < count => return n,
-            _ => println!("  (enter a number 0..{})", count.saturating_sub(1)),
+        if let Ok(Event::Key(k)) = event::read() {
+            if k.kind != KeyEventKind::Press && k.kind != KeyEventKind::Repeat {
+                continue;
+            }
+            if k.code == KeyCode::Char('q')
+                || (k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL))
+            {
+                quit();
+            }
+            return k.code;
         }
     }
+}
+
+/// Restore the terminal and exit immediately (used for `q` / Ctrl-C).
+fn quit() -> ! {
+    let mut out = io::stdout();
+    let _ = queue!(out, cursor::Show, LeaveAlternateScreen);
+    let _ = out.flush();
+    let _ = disable_raw_mode();
+    std::process::exit(0);
 }

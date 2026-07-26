@@ -47,6 +47,14 @@ pub struct Card {
     /// Battle position — only meaningful while in a Monster Zone (see
     /// [`crate::position::Position`]). Read it via `Duel::position_of`.
     pub position: crate::position::Position,
+    /// The player who **owns** this card (whose deck it belongs to). Fixed for
+    /// the card's life. Distinct from its *controller* (who currently controls it
+    /// on the field), which the `Field` tracks and can differ via effects.
+    pub owner: usize,
+    /// Why the card most recently left its place — a `REASON_*` bitmask (see
+    /// [`crate::reason`]). Set by `Duel::destroy`; read by "destroyed by …"
+    /// triggers once the event engine exists.
+    pub reason: crate::reason::Reason,
 }
 
 impl Card {

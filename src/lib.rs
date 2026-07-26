@@ -59,6 +59,7 @@ pub mod group;
 pub mod ids;
 pub mod position;
 pub mod processor;
+pub mod reason;
 pub mod script;
 pub mod zone;
 
