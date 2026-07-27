@@ -77,7 +77,9 @@ impl Duel {
         // Anything `run_unit` queues lands on top, at indices >= this depth.
         let depth_before = self.processor_stack.len();
 
-        if self.run_unit(&mut unit) {
+        let unit_run = self.run_unit(&mut unit);
+        self.process_events();
+        if unit_run {
             DuelStatus::Continue // finished: drop it (don't push back)
         } else {
             // Paused: put it back — but BELOW any sub-tasks it just queued, so
@@ -323,6 +325,7 @@ impl Duel {
                     if self.attack_targets(*player).is_empty() {
                         self.declare_attack(*attacker, None);
                         self.resolve_battle(*attacker, None);
+                        self.process_events();
                         self.reopen_battle_menu(*player);
                         true
                     } else {
@@ -337,6 +340,7 @@ impl Duel {
                     let target = self.attack_targets(*player).get(idx).copied();
                     self.declare_attack(*attacker, target);
                     self.resolve_battle(*attacker, target);
+                    self.process_events();
                     self.reopen_battle_menu(*player);
                     true
                 }

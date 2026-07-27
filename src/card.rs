@@ -34,8 +34,10 @@ pub struct CardData {
     pub attribute: u32,
     /// Monster Type ("race" in EDOPro): `RACE_WARRIOR | …` (a bitmask).
     pub race: u64,
-    /// The card's name/rules text. Ours — not part of EDOPro's card_data.
+    /// The card's rules text. Ours — not part of EDOPro's card_data.
     pub text: String,
+    /// The card's name
+    pub name: String,
 }
 
 #[derive(Debug, Default, Clone)]

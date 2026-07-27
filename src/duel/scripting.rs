@@ -4,11 +4,14 @@
 //! effect table as both `self` and `e`; its verbs record intents into the shared
 //! context, and we apply those to the real duel ("describe, then execute").
 
+use mlua::Table;
 use mlua::thread::ThreadStatus;
 
 use crate::effect::{CostType, EffectKind};
+use crate::event::DuelEvent;
 use crate::ids::CardId;
 use crate::processor::DuelStatus;
+use crate::reason::REASON_BATTLE;
 use crate::zone::Zone;
 
 use super::Duel;
@@ -273,5 +276,31 @@ impl Duel {
     fn check_condition(&self, effect: &mlua::Table) -> mlua::Result<bool> {
         let cond = effect.get::<mlua::Function>("condition")?;
         cond.call::<bool>((effect.clone(), effect.clone()))
+    }
+
+    pub fn process_events(&mut self) {
+        while let Some(event) = self.events.pop_front() {
+            let Some(card) = self.get_card(event.card) else {
+                continue;
+            };
+            let card_code = card.code;
+            let player = self.controller_of(event.card);
+            let indexes: Vec<usize> = self.effects.borrow().iter().enumerate()
+                .filter(|(_, (code, t))| 
+                    *code == card_code
+                    && self.effect_kind(t) == EffectKind::Trigger
+                    && t.get::<u32>("event").unwrap_or(0) == event.code
+                )
+                .map(|(i, _)| i)
+                .collect();
+
+            for idx in indexes {
+                self.effect_ctx.borrow_mut().activator = player;
+                let t = self.effects.borrow()[idx].1.clone();
+                if self.check_condition(&t).unwrap_or(false) {
+                    let _ = self.resolve_effect(idx);
+                }
+            }
+        }
     }
 }

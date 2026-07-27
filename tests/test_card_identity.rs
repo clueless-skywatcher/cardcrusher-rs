@@ -12,15 +12,15 @@ use cardcrusher::processor::DuelStatus;
 use cardcrusher::zone::Zone;
 use cardcrusher::{PLAYER_0, PLAYER_1};
 
-/// Step 1: loading `Example.lua` (`Example = Card:new(12345678)` with one
+/// Step 1: loading `ExampleSpell.lua` (`Example = Card:new(12345678)` with one
 /// `add_effect()`) registers the card definition and links its one effect to
 /// that code.
 #[test]
 fn a_loaded_card_links_its_effect_to_its_code() {
     let mut duel = Duel::new();
 
-    duel.load_card("cards/Example.lua")
-        .expect("Example.lua should load");
+    duel.load_card("cards/ExampleSpell.lua")
+        .expect("ExampleSpell.lua should load");
 
     assert_eq!(
         duel.code_effects(12345678).len(),
@@ -39,8 +39,8 @@ fn a_loaded_card_links_its_effect_to_its_code() {
 #[test]
 fn a_card_instance_finds_its_effects() {
     let mut duel = Duel::new();
-    duel.load_card("cards/Example.lua")
-        .expect("Example.lua should load");
+    duel.load_card("cards/ExampleSpell.lua")
+        .expect("ExampleSpell.lua should load");
 
     let card = duel.add_card(Card::new(12345678));
 
@@ -56,8 +56,8 @@ fn a_card_instance_finds_its_effects() {
 #[test]
 fn activating_a_cards_effect_runs_it() {
     let mut duel = Duel::new();
-    duel.load_card("cards/Example.lua")
-        .expect("Example.lua should load");
+    duel.load_card("cards/ExampleSpell.lua")
+        .expect("ExampleSpell.lua should load");
 
     let foe = duel.add_card(Card::new(0));
     duel.place(PLAYER_1, foe, Zone::MonsterZone);

@@ -13,14 +13,14 @@ use cardcrusher::processor::DuelStatus;
 use cardcrusher::zone::Zone;
 use cardcrusher::{PLAYER_0, PLAYER_1};
 
-/// Loading `Example.lua` runs it, and its single `add_effect()` registers one
+/// Loading `ExampleSpell.lua` runs it, and its single `add_effect()` registers one
 /// effect on the duel.
 #[test]
 fn loading_a_card_registers_its_effect() {
     let mut duel = Duel::new();
 
-    duel.load_card("cards/Example.lua")
-        .expect("Example.lua should load");
+    duel.load_card("cards/ExampleSpell.lua")
+        .expect("ExampleSpell.lua should load");
 
     assert_eq!(
         duel.effect_count(),
@@ -41,8 +41,8 @@ fn resolving_an_effect_destroys_its_target() {
     let mut duel = Duel::new();
     let monster = duel.add_card(Card::new(0));
 
-    duel.load_card("cards/Example.lua")
-        .expect("Example.lua should load");
+    duel.load_card("cards/ExampleSpell.lua")
+        .expect("ExampleSpell.lua should load");
 
     // Give effect 0 its target, then resolve it.
     duel.set_targets(vec![monster]);
@@ -60,8 +60,8 @@ fn resolving_an_effect_destroys_its_target() {
 #[test]
 fn paying_an_effects_cost_deducts_lp_from_the_activating_player() {
     let mut duel = Duel::new();
-    duel.load_card("cards/Example.lua")
-        .expect("Example.lua should load");
+    duel.load_card("cards/ExampleSpell.lua")
+        .expect("ExampleSpell.lua should load");
 
     duel.pay_cost(0, PLAYER_0).expect("cost should be paid");
 
@@ -85,8 +85,8 @@ fn cannot_activate_an_unpayable_cost() {
     let mut duel = Duel::new();
     let foe = duel.add_card(Card::new(0));
     duel.place(PLAYER_1, foe, Zone::MonsterZone);
-    duel.load_card("cards/Example.lua")
-        .expect("Example.lua should load");
+    duel.load_card("cards/ExampleSpell.lua")
+        .expect("ExampleSpell.lua should load");
     let spell = duel.add_card(Card::new(12345678));
 
     // Bring player 0 below the 500 LP cost.
@@ -119,8 +119,8 @@ fn activating_targets_and_destroys_an_opponent_monster() {
     let mut duel = Duel::new();
     let foe = duel.add_card(Card::new(0));
     duel.place(PLAYER_1, foe, Zone::MonsterZone);
-    duel.load_card("cards/Example.lua")
-        .expect("Example.lua should load");
+    duel.load_card("cards/ExampleSpell.lua")
+        .expect("ExampleSpell.lua should load");
     let spell = duel.add_card(Card::new(12345678));
 
     // Activate this card's effect as player 0: cost paid, then freeze for the pick.
@@ -158,8 +158,8 @@ fn opponent_is_relative_to_the_activating_player() {
     let mut duel = Duel::new();
     let mine = duel.add_card(Card::new(0));
     duel.place(PLAYER_0, mine, Zone::MonsterZone);
-    duel.load_card("cards/Example.lua")
-        .expect("Example.lua should load");
+    duel.load_card("cards/ExampleSpell.lua")
+        .expect("ExampleSpell.lua should load");
     let spell = duel.add_card(Card::new(12345678));
 
     // Player 1 activates → their opponent is player 0 → only candidate is `mine`.
@@ -184,8 +184,8 @@ fn opponent_is_relative_to_the_activating_player() {
 fn cannot_activate_with_no_legal_target() {
     let mut duel = Duel::new();
     // No monsters on the field — nothing to target.
-    duel.load_card("cards/Example.lua")
-        .expect("Example.lua should load");
+    duel.load_card("cards/ExampleSpell.lua")
+        .expect("ExampleSpell.lua should load");
     let spell = duel.add_card(Card::new(12345678));
 
     let status = duel

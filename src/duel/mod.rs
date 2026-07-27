@@ -18,7 +18,7 @@ mod driver;
 mod scripting;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use mlua::{Lua, Table, Thread};
@@ -27,6 +27,7 @@ use slotmap::SlotMap;
 use crate::card::{Card, CardData};
 use crate::constants::DuelMessage;
 use crate::effect::EffectContext;
+use crate::event::DuelEvent;
 use crate::field::Field;
 use crate::ids::CardId;
 use crate::processor::Processor;
@@ -76,6 +77,8 @@ pub struct Duel {
     effect_ctx: Rc<RefCell<EffectContext>>,
 
     pending: Option<(Thread, usize, CardId)>,
+
+    events: VecDeque<DuelEvent>
 }
 
 impl Default for Duel {
@@ -125,6 +128,7 @@ impl Duel {
             card_data,
             effect_ctx,
             pending: None,
+            events: VecDeque::new()
         };
         duel.load_prelude();
         duel
@@ -159,6 +163,7 @@ impl Duel {
                     attribute: data.get("attribute").unwrap_or(0),
                     race: data.get("race").unwrap_or(0),
                     text: data.get("text").unwrap_or_default(),
+                    name: data.get("name").unwrap_or_default(),
                 },
             );
             Ok(())
@@ -170,11 +175,27 @@ impl Duel {
     }
 
     fn load_prelude(&mut self) {
-        // Baked into the binary at compile time — no runtime file dependency,
-        // so every build runs the byte-identical prelude (determinism).
-        const PRELUDE: &str = include_str!("prelude.lua");
-
-        self.vm.load(PRELUDE).exec().expect("prelude is valid Lua");
+        // Baked into the binary at compile time — no runtime file dependency, so
+        // every build runs the byte-identical prelude (determinism). Constant
+        // tables load first; the base classes (`base.lua`) load last and may use
+        // them. Cards are loaded later still and rely on all of it.
+        const PRELUDE: [(&str, &str); 8] = [
+            ("players", include_str!("prelude/players.lua")),
+            ("effect_kinds", include_str!("prelude/effect_kinds.lua")),
+            ("categories", include_str!("prelude/categories.lua")),
+            ("card_types", include_str!("prelude/card_types.lua")),
+            ("attributes", include_str!("prelude/attributes.lua")),
+            ("races", include_str!("prelude/races.lua")),
+            ("base", include_str!("prelude/base.lua")),
+            ("events", include_str!("prelude/events.lua")),
+        ];
+        for (name, src) in PRELUDE {
+            self.vm
+                .load(src)
+                .set_name(name)
+                .exec()
+                .unwrap_or_else(|e| panic!("prelude '{name}' is valid Lua: {e}"));
+        }
     }
 }
 

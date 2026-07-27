@@ -6,6 +6,8 @@
 //! instance reports those numbers — the base a Battle Phase needs to compare
 //! attacker vs defender.
 
+use std::assert_eq;
+
 use cardcrusher::duel::Duel;
 use cardcrusher::zone::Zone;
 use cardcrusher::PLAYER_0;
@@ -41,7 +43,12 @@ fn a_summoned_monster_reports_its_stats() {
     assert_eq!(data.card_type, TYPE_MONSTER | TYPE_NORMAL, "Normal Monster");
     assert_eq!(data.attribute, ATTRIBUTE_EARTH, "EARTH");
     assert_eq!(data.race, RACE_BEASTWARRIOR, "Beast-Warrior");
-    assert_eq!(data.text, "Beaver Warrior", "carries its text");
+    assert_eq!(data.name, "Beaver Warrior", "carries its name");
+    assert_eq!(
+        data.text,
+        "What this creature lacks in size it makes up for in defense when battling in the prairie.",
+        "carries its text"
+    );
 }
 
 /// A code that was never loaded makes a bare card — zeroed stats, not a panic.

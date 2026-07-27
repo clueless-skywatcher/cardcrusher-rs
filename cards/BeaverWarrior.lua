@@ -9,5 +9,6 @@ BeaverWarrior = Card:new(32452818, {
     level = 4,
     attribute = ATTRIBUTE_EARTH,
     race = RACE_BEASTWARRIOR,
-    text = "Beaver Warrior",
+    name = "Beaver Warrior",
+    text = "What this creature lacks in size it makes up for in defense when battling in the prairie.",
 })

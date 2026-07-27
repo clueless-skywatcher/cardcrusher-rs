@@ -62,6 +62,7 @@ pub mod processor;
 pub mod reason;
 pub mod script;
 pub mod zone;
+pub mod event;
 
 // Re-exported so shared constants are reachable as `cardcrusher::PLAYER_0`, etc.
 pub use constants::*;

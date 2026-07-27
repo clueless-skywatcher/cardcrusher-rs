@@ -33,7 +33,6 @@ use crossterm::terminal::{
 };
 use crossterm::{cursor, queue, terminal};
 
-use cardcrusher::card::{Card, CardData};
 use cardcrusher::duel::{Duel, Winner};
 use cardcrusher::ids::CardId;
 use cardcrusher::position::Position;
@@ -75,47 +74,54 @@ fn main() {
 /// A fixed opening position: player 0 holds the Example spell + a monster to
 /// summon; player 1 has a monster on the field to target. Small decks so turns
 /// don't deck-out instantly (they will, eventually — that ends the game).
+// The codes the demo builds a deck from; all data comes from the loaded scripts.
+const KURIBOH: u32 = 40640057;
+const BEAVER_WARRIOR: u32 = 32452818;
+const FERAL_IMP: u32 = 41392891;
+const MYSTICAL_ELF: u32 = 15025844;
+const EXAMPLE_SPELL: u32 = 12345678;
+
 fn setup() -> Duel {
     let mut duel = Duel::new();
-    duel.load_card("cards/Example.lua")
-        .expect("cards/Example.lua should load");
+    load_all_cards(&mut duel);
 
-    // (code, ATK, DEF) — real-ish stats so the Battle Phase actually decides.
-    let deck = [
-        (1001u32, 300, 200), // Kuriboh
-        (1002, 1200, 1500),  // Beaver Warrior
-        (1003, 1300, 1400),  // Feral Imp
-        (1004, 800, 2000),   // Mystical Elf — a defensive wall
-    ];
+    // A small mixed deck, built purely from codes — every stat/name/text is
+    // whatever the loaded `.lua` scripts declared.
+    let deck = [KURIBOH, BEAVER_WARRIOR, FERAL_IMP, MYSTICAL_ELF];
     for i in 0..8 {
-        let (c, a, d) = deck[i % deck.len()];
-        duel.add_to_deck(0, mon(c, a, d));
-        let (c, a, d) = deck[(i + 1) % deck.len()];
-        duel.add_to_deck(1, mon(c, a, d));
+        let a = duel.make_card(deck[i % deck.len()]);
+        duel.add_to_deck(0, a);
+        let b = duel.make_card(deck[(i + 1) % deck.len()]);
+        duel.add_to_deck(1, b);
     }
-    let spell = duel.make_card(12345678); // Example Spell — real record from Lua
-    duel.add_to_hand(0, spell);
-    duel.add_to_hand(0, mon(1003, 1300, 1400)); // Feral Imp — a monster to summon
 
-    let foe = duel.add_card(mon(1002, 1200, 1500)); // Beaver Warrior on the foe's field
+    let spell = duel.make_card(EXAMPLE_SPELL);
+    duel.add_to_hand(0, spell);
+    let imp = duel.make_card(FERAL_IMP); // a monster to summon
+    duel.add_to_hand(0, imp);
+    let kuriboh = duel.make_card(KURIBOH);
+    duel.add_to_hand(0, kuriboh);
+    let foe = duel.make_card(BEAVER_WARRIOR); // on the opponent's field
+    let foe = duel.add_card(foe);
     duel.place(1, foe, Zone::MonsterZone);
     duel
 }
 
-/// A vanilla monster with the given code and ATK/DEF (the demo's shortcut for a
-/// card definition; real cards declare this in their `.lua` script). We stamp a
-/// plausible type/level so the details panel has something to show.
-fn mon(code: u32, atk: i32, def: i32) -> Card {
-    Card::with_data(
-        code,
-        CardData {
-            card_type: 0x1 | 0x10, // TYPE_MONSTER | TYPE_NORMAL
-            atk,
-            def,
-            level: 4,
-            ..Default::default()
-        },
-    )
+/// Load every card script in `cards/` at startup — the demo's "card database".
+/// Sorted before loading so the load order (and thus effect registration) is
+/// deterministic regardless of how the filesystem lists the directory.
+fn load_all_cards(duel: &mut Duel) {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir("cards")
+        .expect("read the cards/ directory")
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("lua"))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let p = path.to_str().expect("card path is valid UTF-8");
+        duel.load_card(p)
+            .unwrap_or_else(|e| panic!("failed to load {p}: {e}"));
+    }
 }
 
 /// Whose turn it is right now (the player acting at a prompt).
@@ -130,6 +136,7 @@ struct Cell {
     ch: char,
     fg: Color,
     bold: bool,
+    italic: bool,
 }
 
 impl Default for Cell {
@@ -138,6 +145,7 @@ impl Default for Cell {
             ch: ' ',
             fg: Color::Reset,
             bold: false,
+            italic: false,
         }
     }
 }
@@ -154,7 +162,9 @@ struct Screen {
 impl Screen {
     fn new() -> Self {
         let (w, h) = terminal::size().unwrap_or((100, 40));
-        let (w, h) = (w as usize, h.max(30) as usize);
+        // Use the REAL terminal size (a small floor avoids a degenerate buffer).
+        // Inflating it would place rows below the visible area and corrupt output.
+        let (w, h) = ((w as usize).max(40), (h as usize).max(18));
         Screen {
             w,
             h,
@@ -176,14 +186,14 @@ impl Screen {
     }
 
     fn put(&mut self, x: u16, y: u16, s: &str, fg: Color) {
-        self.put_styled(x, y, s, fg, false);
+        self.put_styled(x, y, s, fg, false, false);
     }
 
     fn put_bold(&mut self, x: u16, y: u16, s: &str, fg: Color) {
-        self.put_styled(x, y, s, fg, true);
+        self.put_styled(x, y, s, fg, true, false);
     }
 
-    fn put_styled(&mut self, x: u16, y: u16, s: &str, fg: Color, bold: bool) {
+    fn put_styled(&mut self, x: u16, y: u16, s: &str, fg: Color, bold: bool, italic: bool) {
         let (x, y) = (x as usize, y as usize);
         if y >= self.h {
             return;
@@ -193,7 +203,12 @@ impl Screen {
             if cx >= self.w {
                 break;
             }
-            self.cur[y * self.w + cx] = Cell { ch, fg, bold };
+            self.cur[y * self.w + cx] = Cell {
+                ch,
+                fg,
+                bold,
+                italic,
+            };
         }
     }
 
@@ -209,7 +224,11 @@ impl Screen {
             while i < self.w {
                 let cell = row[i];
                 let mut j = i + 1;
-                while j < self.w && row[j].fg == cell.fg && row[j].bold == cell.bold {
+                while j < self.w
+                    && row[j].fg == cell.fg
+                    && row[j].bold == cell.bold
+                    && row[j].italic == cell.italic
+                {
                     j += 1;
                 }
                 let run: String = row[i..j].iter().map(|c| c.ch).collect();
@@ -217,8 +236,11 @@ impl Screen {
                 if cell.bold {
                     let _ = queue!(out, SetAttribute(Attribute::Bold));
                 }
+                if cell.italic {
+                    let _ = queue!(out, SetAttribute(Attribute::Italic));
+                }
                 let _ = queue!(out, Print(run));
-                if cell.bold {
+                if cell.bold || cell.italic {
                     let _ = queue!(out, SetAttribute(Attribute::Reset));
                 }
                 i = j;
@@ -244,8 +266,9 @@ struct Ui {
     /// Inspection cursor over the four field rows (0..4) × five columns (0..5).
     row: usize,
     col: usize,
-    /// Selected menu item.
+    /// Selected menu item, and the first visible menu row (scroll offset).
     sel: usize,
+    menu_scroll: usize,
     screen: Screen,
 }
 
@@ -256,6 +279,7 @@ impl Ui {
             row: 0,
             col: 0,
             sel: 0,
+            menu_scroll: 0,
             screen: Screen::new(),
         }
     }
@@ -296,28 +320,21 @@ fn respond_card(label: impl Into<String>, bytes: Vec<u8>, card: CardId) -> Item 
 // ===== Card naming & flag decoding =======================================
 
 const TYPE_MONSTER: u32 = 0x1;
-const TYPE_SPELL: u32 = 0x2;
+const TYPE_NORMAL: u32 = 0x10;
 
-fn card_name(code: u32) -> &'static str {
-    match code {
-        12345678 => "Example Spell",
-        11111111 => "CantActivate",
-        10312660 => "You're in Danger!",
-        1001 => "Kuriboh",
-        1002 => "Beaver Warrior",
-        1003 => "Feral Imp",
-        1004 => "Mystical Elf",
-        _ => "Monster",
+/// Whether a card is a Monster (vs a Spell/Trap), from its harvested type.
+fn is_monster(duel: &Duel, id: CardId) -> bool {
+    duel.card_data(id)
+        .is_some_and(|d| d.card_type & TYPE_MONSTER != 0)
+}
+
+/// The card's name, straight from its harvested record (`data.name`). Falls back
+/// to "?" for a nameless card (shouldn't happen for cards the demo sets up).
+fn name_of(duel: &Duel, id: CardId) -> &str {
+    match duel.get_card(id) {
+        Some(c) if !c.data.name.is_empty() => &c.data.name,
+        _ => "?",
     }
-}
-
-/// The Example Spell is our only Spell; everything else in the demo is a monster.
-fn is_monster(code: u32) -> bool {
-    code != 12345678
-}
-
-fn name_of(duel: &Duel, id: CardId) -> &'static str {
-    card_name(duel.get_card(id).map(|c| c.code).unwrap_or(0))
 }
 
 fn pos_abbr(pos: Position) -> &'static str {
@@ -413,20 +430,38 @@ fn race_name(r: u64) -> &'static str {
 
 const CELL_W: usize = 9; // inner width of a card cell
 const CELL_TW: u16 = CELL_W as u16 + 2; // with borders
+const CELL_H: u16 = 4; // rows per cell: top border, name, stats, bottom border
 const GAP: u16 = 1;
 const LABEL_X: u16 = 1;
 const BOARD_X: u16 = 5; // x of the first cell (row labels sit to the left)
 
+// Vertical layout — compact (3-row cells) so the board leaves room for the menu
+// on a normal ~24-row terminal.
 const TITLE_Y: u16 = 0;
 const OPP_HDR_Y: u16 = 1;
 const R0_Y: u16 = 2; // opponent S/T
-const R1_Y: u16 = 6; // opponent Monsters
-const DIV_Y: u16 = 10;
-const R2_Y: u16 = 11; // your Monsters
-const R3_Y: u16 = 15; // your S/T
-const YOU_HDR_Y: u16 = 19;
-const MENU_Y: u16 = 21;
-const PANEL_X: u16 = BOARD_X + 5 * CELL_TW + 4 * GAP + 2;
+const R1_Y: u16 = R0_Y + CELL_H; // opponent Monsters
+const DIV_Y: u16 = R1_Y + CELL_H; // centre divider
+const R2_Y: u16 = DIV_Y + 1; // your Monsters
+const R3_Y: u16 = R2_Y + CELL_H; // your S/T
+const YOU_HDR_Y: u16 = R3_Y + CELL_H;
+const MENU_Y: u16 = YOU_HDR_Y + 2;
+
+// The right-hand column (details / hand / graveyard panels).
+const BOARD_RIGHT: u16 = BOARD_X + 5 * CELL_TW + 4 * GAP; // x just past the board
+const PANEL_X: u16 = BOARD_RIGHT + 2;
+
+/// Width of the right-hand panel for a terminal `screen_w` cols wide — it shrinks
+/// to fit and is capped at 24.
+fn panel_w(screen_w: usize) -> usize {
+    // Reserve the panel's left+right borders so it never spills off the edge.
+    (screen_w as u16).saturating_sub(PANEL_X + 2).clamp(8, 24) as usize
+}
+
+/// Is the terminal wide enough to show the right-hand column at all?
+fn has_side_panel(screen_w: usize) -> bool {
+    screen_w as u16 >= PANEL_X + 10
+}
 
 /// The four navigable field rows, from `you`'s view (top → bottom).
 fn nav_rows(you: usize) -> [(usize, Zone, u16, &'static str); 4] {
@@ -532,8 +567,8 @@ fn draw_board(scr: &mut Screen, duel: &Duel, focus: Focus, cursor: (usize, usize
         Color::White,
     );
     let (focus_txt, focus_col) = match focus {
-        Focus::Menu => ("[MENU]  Tab→board", Color::Cyan),
-        Focus::Board => ("[BOARD] Tab→menu", Color::Yellow),
+        Focus::Menu => ("[MENU]", Color::Cyan),
+        Focus::Board => ("[BOARD]", Color::Yellow),
     };
     scr.put(PANEL_X, TITLE_Y, focus_txt, focus_col);
 
@@ -548,7 +583,12 @@ fn draw_board(scr: &mut Screen, duel: &Duel, focus: Focus, cursor: (usize, usize
             draw_cell(scr, cell_x(c), y, duel, cards.get(c).copied(), hi);
         }
         if y == R1_Y {
-            scr.put(LABEL_X, DIV_Y, &"─".repeat(60), Color::DarkGrey);
+            scr.put(
+                LABEL_X,
+                DIV_Y,
+                &"─".repeat(BOARD_RIGHT as usize),
+                Color::DarkGrey,
+            );
         }
     }
     draw_header(scr, YOU_HDR_Y, duel, you, "You");
@@ -557,46 +597,74 @@ fn draw_board(scr: &mut Screen, duel: &Duel, focus: Focus, cursor: (usize, usize
 fn render(duel: &Duel, ui: &mut Ui, title: &str, items: &[Item]) {
     let you = current(duel);
     let focused = focused_card(duel, ui, items);
-    let (focus, row, col, sel) = (ui.focus, ui.row, ui.col, ui.sel);
+
+    // Update the menu's scroll offset (edge-triggered) before borrowing the
+    // screen. The window is the rows between the menu header and the last line.
+    let menu_visible = visible_rows(ui.screen.h, MENU_Y + 1);
+    ui.menu_scroll = scroll_offset(ui.sel, items.len(), menu_visible, ui.menu_scroll);
+
+    let (focus, row, col, sel, offset) = (ui.focus, ui.row, ui.col, ui.sel, ui.menu_scroll);
     let scr = &mut ui.screen;
     scr.begin();
 
     draw_board(scr, duel, focus, (row, col), you);
 
-    // Menu (bottom), over the field.
+    // Menu (bottom), over the field — a scrolling viewport that follows the
+    // selection, so a long list can't run off the screen. The window shows
+    // `visible` options; moving past the bottom scrolls, hiding the top.
     let menu_dim = focus == Focus::Board;
+    let first_row = MENU_Y + 1;
+    let visible = menu_visible;
+    let end = (offset + visible).min(items.len());
+
+    let mut header = format!("▸ {title}");
+    if items.len() > visible {
+        header.push_str(&format!("   [{}-{} of {}]", offset + 1, end, items.len()));
+    }
     scr.put_bold(
         LABEL_X,
         MENU_Y,
-        &format!("▸ {title}"),
+        &header,
         if menu_dim {
             Color::DarkGrey
         } else {
             Color::White
         },
     );
-    for (i, item) in items.iter().enumerate() {
-        let y = MENU_Y + 1 + i as u16;
+
+    for (row, i) in (offset..end).enumerate() {
+        let y = first_row + row as u16;
         let (marker, color) = match (i == sel, menu_dim) {
             (true, false) => ("›", Color::Yellow),
             (true, true) => ("·", Color::Grey),
             _ => (" ", Color::White),
         };
-        scr.put(LABEL_X, y, &format!("{marker} {}", item.label), color);
+        // Edge rows hint at more items above/below when the list is clipped.
+        let marker = if row == 0 && offset > 0 {
+            "↑"
+        } else if row + 1 == (end - offset) && end < items.len() {
+            "↓"
+        } else {
+            marker
+        };
+        scr.put(LABEL_X, y, &format!("{marker} {}", items[i].label), color);
     }
     scr.put(
         LABEL_X,
-        MENU_Y + 2 + items.len() as u16,
+        first_row + (end - offset) as u16,
         "Tab focus · ↑↓ move · Enter select · q quit",
         Color::DarkGrey,
     );
 
     // Right column: the focused card's details (if any), then the hand below it.
-    let mut y = R0_Y;
-    if let Some(id) = focused {
-        y = draw_card_panel(scr, id, duel) + 1;
+    // Skipped entirely on a terminal too narrow to hold it.
+    if has_side_panel(scr.w) {
+        let mut y = R0_Y;
+        if let Some(id) = focused {
+            y = draw_card_panel(scr, id, duel, R0_Y) + 1;
+        }
+        draw_hand_panel(scr, duel, you, y);
     }
-    draw_hand_panel(scr, duel, you, y);
 
     scr.flush(&mut io::stdout());
 }
@@ -611,30 +679,35 @@ fn focused_card(duel: &Duel, ui: &Ui, items: &[Item]) -> Option<CardId> {
     }
 }
 
-const PANEL_W: usize = 24;
-
 /// Draw the card-details panel at the top of the right column. Returns the `y`
 /// of its bottom border (so the hand panel can sit right under it). Spells and
 /// monsters get different layouts (a spell has no ATK/DEF/level — just its text).
-fn draw_card_panel(scr: &mut Screen, id: CardId, duel: &Duel) -> u16 {
+fn draw_card_panel(scr: &mut Screen, id: CardId, duel: &Duel, top_y: u16) -> u16 {
     let data = match duel.card_data(id) {
         Some(d) => d,
         None => return R0_Y.saturating_sub(1),
     };
 
+    let is_monster = data.card_type & TYPE_MONSTER != 0;
+    let is_normal = data.card_type & TYPE_NORMAL != 0;
+
     // Name + type header, shared by both layouts.
-    let mut lines: Vec<(String, Color)> = vec![
-        (name_of(duel, id).to_string(), Color::White),
-        (type_desc(data.card_type), Color::Grey),
+    let mut lines: Vec<PanelLine> = vec![
+        (name_of(duel, id).to_string(), Color::White, false),
+        (type_desc(data.card_type), Color::Grey, false),
     ];
 
-    let (title, body_color) = if data.card_type & TYPE_SPELL != 0 {
+    let (title, body_color) = if !is_monster {
         // Spell layout: its effect text, and nothing else. (Normal Spells only.)
         (" Spell ", Color::White)
     } else {
         // Monster layout: the battle numbers.
-        lines.push((format!("ATK {}   DEF {}", data.atk, data.def), Color::Green));
-        lines.push((format!("Level {}", data.level), Color::Grey));
+        lines.push((
+            format!("ATK {}   DEF {}", data.atk, data.def),
+            Color::Green,
+            false,
+        ));
+        lines.push((format!("Level {}", data.level), Color::Grey, false));
         lines.push((
             format!(
                 "{} · {}",
@@ -642,26 +715,33 @@ fn draw_card_panel(scr: &mut Screen, id: CardId, duel: &Duel) -> u16 {
                 race_name(data.race)
             ),
             Color::Cyan,
+            false,
         ));
         if let Some(pos) = duel.position_of(id) {
-            lines.push((format!("Position: {}", pos_abbr(pos)), pos_color(Some(pos))));
+            lines.push((
+                format!("Position: {}", pos_abbr(pos)),
+                pos_color(Some(pos)),
+                false,
+            ));
         }
         (" Monster ", Color::DarkGrey)
     };
 
-    // Card text (the effect) — the whole point of the spell panel.
+    // Card text: flavour text of a Normal Monster is shown in italics; a Spell's
+    // (or effect) text is upright.
+    let text_italic = is_monster && is_normal;
     if data.text.is_empty() {
-        if data.card_type & TYPE_MONSTER == 0 {
-            lines.push(("(no text)".into(), Color::DarkGrey));
+        if !is_monster {
+            lines.push(("(no text)".into(), Color::DarkGrey, false));
         }
     } else {
-        lines.push((String::new(), Color::Grey));
-        for chunk in wrap(&data.text, PANEL_W) {
-            lines.push((chunk, body_color));
+        lines.push((String::new(), Color::Grey, false));
+        for chunk in wrap(&data.text, panel_w(scr.w)) {
+            lines.push((chunk, body_color, text_italic));
         }
     }
 
-    draw_panel(scr, R0_Y, title, &lines)
+    draw_panel(scr, top_y, title, &lines, 0)
 }
 
 /// Draw the hand as a panel below the card panel: each card indexed, with stats.
@@ -669,31 +749,86 @@ fn draw_hand_panel(scr: &mut Screen, duel: &Duel, you: usize, top_y: u16) {
     let cards: Vec<CardId> = (0..duel.hand_count(you))
         .filter_map(|i| duel.hand_card(you, i))
         .collect();
-    let lines: Vec<(String, Color)> = if cards.is_empty() {
-        vec![("(empty)".into(), Color::DarkGrey)]
+    let lines: Vec<PanelLine> = if cards.is_empty() {
+        vec![("(empty)".into(), Color::DarkGrey, false)]
     } else {
         cards
             .iter()
             .enumerate()
-            .map(|(i, &id)| (format!("[{i}] {}", hand_label(duel, id)), Color::White))
+            .map(|(i, &id)| {
+                (
+                    format!("[{i}] {}", hand_label(duel, id)),
+                    Color::White,
+                    false,
+                )
+            })
             .collect()
     };
-    draw_panel(scr, top_y, " Hand ", &lines);
+    draw_panel(scr, top_y, " Hand ", &lines, 0);
 }
 
 /// Draw a titled box at `(PANEL_X, top_y)` with the given lines. Returns the `y`
 /// of the bottom border.
-fn draw_panel(scr: &mut Screen, top_y: u16, title: &str, lines: &[(String, Color)]) -> u16 {
-    let bar = "─".repeat(PANEL_W);
-    scr.put(PANEL_X, top_y, &format!("┌{bar}┐"), Color::DarkGrey);
-    scr.put(PANEL_X + 2, top_y, title, Color::Grey); // title overlays the border
-    for (i, (text, color)) in lines.iter().enumerate() {
-        let y = top_y + 1 + i as u16;
-        scr.put(PANEL_X, y, "│", Color::DarkGrey);
-        scr.put(PANEL_X + 1, y, &fit(text, PANEL_W), *color);
-        scr.put(PANEL_X + 1 + PANEL_W as u16, y, "│", Color::DarkGrey);
+/// One line in a panel: its text, colour, and whether it's italic.
+type PanelLine = (String, Color, bool);
+
+/// How many content rows fit below a header row at `top_y` while keeping the
+/// bottom border (or hint line) on-screen.
+fn visible_rows(h: usize, top_y: u16) -> usize {
+    (h as u16).saturating_sub(top_y + 2).max(1) as usize
+}
+
+/// Edge-triggered scroll: nudge `offset` *minimally* so `sel` stays within a
+/// `visible`-row window over `len` items. The highlight moves freely inside the
+/// window and the list only scrolls when the highlight reaches an edge.
+fn scroll_offset(sel: usize, len: usize, visible: usize, offset: usize) -> usize {
+    if visible == 0 || len <= visible {
+        return 0;
     }
-    let bottom = top_y + 1 + lines.len() as u16;
+    let max_off = len - visible;
+    let mut off = offset.min(max_off);
+    if sel < off {
+        off = sel; // scrolled above the window → pull up to it
+    } else if sel >= off + visible {
+        off = sel + 1 - visible; // below the window → pull down to it
+    }
+    off
+}
+
+/// Draw a titled box at `(PANEL_X, top_y)` with `lines`, **clipped to the screen
+/// height** so the bottom border stays on-screen. `offset` is the first visible
+/// line (the caller owns the scroll state — see `scroll_offset`); pass `0` to
+/// clip from the top. A `[a-b of n]` counter appears in the title when clipped.
+/// Returns the `y` of the bottom border.
+fn draw_panel(
+    scr: &mut Screen,
+    top_y: u16,
+    title: &str,
+    lines: &[PanelLine],
+    offset: usize,
+) -> u16 {
+    let max_rows = visible_rows(scr.h, top_y);
+    let n = lines.len();
+    let offset = offset.min(n.saturating_sub(max_rows)); // never scroll past the end
+    let end = (offset + max_rows).min(n);
+
+    let pw = panel_w(scr.w);
+    let bar = "─".repeat(pw);
+    scr.put(PANEL_X, top_y, &format!("┌{bar}┐"), Color::DarkGrey);
+    let mut header = title.to_string();
+    if n > max_rows {
+        header.push_str(&format!("[{}-{} of {}]", offset + 1, end, n));
+    }
+    scr.put(PANEL_X + 2, top_y, &header, Color::Grey); // title overlays the border
+
+    for (row, i) in (offset..end).enumerate() {
+        let y = top_y + 1 + row as u16;
+        let (text, color, italic) = &lines[i];
+        scr.put(PANEL_X, y, "│", Color::DarkGrey);
+        scr.put_styled(PANEL_X + 1, y, &fit(text, pw), *color, false, *italic);
+        scr.put(PANEL_X + 1 + pw as u16, y, "│", Color::DarkGrey);
+    }
+    let bottom = top_y + 1 + (end - offset) as u16;
     scr.put(PANEL_X, bottom, &format!("└{bar}┘"), Color::DarkGrey);
     bottom
 }
@@ -718,9 +853,8 @@ fn wrap(s: &str, w: usize) -> Vec<String> {
 }
 
 fn hand_label(duel: &Duel, id: CardId) -> String {
-    let code = duel.get_card(id).map(|c| c.code).unwrap_or(0);
-    let name = card_name(code);
-    match (is_monster(code), duel.atk_of(id), duel.def_of(id)) {
+    let name = name_of(duel, id);
+    match (is_monster(duel, id), duel.atk_of(id), duel.def_of(id)) {
         (true, Some(a), Some(d)) => format!("{name} ({a}/{d})"),
         _ => name.to_string(),
     }
@@ -832,7 +966,7 @@ fn main_phase_menu(duel: &mut Duel, ui: &mut Ui) {
 
     for i in 0..duel.hand_count(you) {
         if let Some(id) = duel.hand_card(you, i) {
-            if duel.get_card(id).map(|c| c.code).is_some_and(is_monster) {
+            if is_monster(duel, id) {
                 items.push(respond_card(
                     format!("Summon {}", name_of(duel, id)),
                     vec![CMD_SUMMON, i as u8],
@@ -905,20 +1039,25 @@ fn view_gy(duel: &Duel, ui: &mut Ui, player: usize) {
     let cards = duel.graveyard(player);
     let you = current(duel);
     let mut sel = 0usize;
+    let mut scroll = 0usize;
 
     loop {
         {
+            // The list sits at a FIXED top and scrolls internally, so it never
+            // reflows as the selection moves.
+            let visible = visible_rows(ui.screen.h, R0_Y);
+            scroll = scroll_offset(sel, cards.len(), visible, scroll);
+
             let scr = &mut ui.screen;
             scr.begin();
-            // Keep the board (no cursor highlight — the GY list has its own).
             draw_board(scr, duel, Focus::Menu, (0, 0), you);
 
-            // Right column: details of the highlighted GY card, then the list.
-            let mut y = R0_Y;
+            // List on top (fixed); the selected card's details go BELOW it — its
+            // varying height is harmless since nothing is drawn under it.
+            let list_bottom = draw_gy_panel(scr, duel, &cards, sel, scroll, R0_Y);
             if let Some(&id) = cards.get(sel) {
-                y = draw_card_panel(scr, id, duel) + 1;
+                draw_card_panel(scr, id, duel, list_bottom + 1);
             }
-            draw_gy_panel(scr, duel, &cards, sel, y);
 
             scr.put_bold(
                 LABEL_X,
@@ -943,10 +1082,18 @@ fn view_gy(duel: &Duel, ui: &mut Ui, player: usize) {
     }
 }
 
-/// The graveyard list panel, with the highlighted card marked.
-fn draw_gy_panel(scr: &mut Screen, duel: &Duel, cards: &[CardId], sel: usize, top_y: u16) {
-    let lines: Vec<(String, Color)> = if cards.is_empty() {
-        vec![("(empty)".into(), Color::DarkGrey)]
+/// The graveyard list panel, with the highlighted card marked. `offset` is the
+/// first visible row (the caller scrolls it with `scroll_offset`).
+fn draw_gy_panel(
+    scr: &mut Screen,
+    duel: &Duel,
+    cards: &[CardId],
+    sel: usize,
+    offset: usize,
+    top_y: u16,
+) -> u16 {
+    let lines: Vec<PanelLine> = if cards.is_empty() {
+        vec![("(empty)".into(), Color::DarkGrey, false)]
     } else {
         cards
             .iter()
@@ -958,11 +1105,11 @@ fn draw_gy_panel(scr: &mut Screen, duel: &Duel, cards: &[CardId], sel: usize, to
                 } else {
                     Color::White
                 };
-                (format!("{marker} {}", hand_label(duel, id)), color)
+                (format!("{marker} {}", hand_label(duel, id)), color, false)
             })
             .collect()
     };
-    draw_panel(scr, top_y, " Graveyard ", &lines);
+    draw_panel(scr, top_y, " Graveyard ", &lines, offset)
 }
 
 fn game_over(duel: &Duel, ui: &mut Ui) {

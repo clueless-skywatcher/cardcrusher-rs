@@ -3,9 +3,10 @@
 
 use crate::card::{Card, CardData};
 use crate::constants::{PLAYER_0, PLAYER_1};
+use crate::event::{DuelEvent, EVENT_BATTLE_DESTROYED, EVENT_DESTROYED};
 use crate::ids::CardId;
 use crate::position::Position;
-use crate::reason::{Reason, REASON_DESTROY};
+use crate::reason::{Reason, REASON_BATTLE, REASON_DESTROY};
 use crate::zone::Zone;
 
 use super::{Duel, WinReason, Winner};
@@ -154,6 +155,18 @@ impl Duel {
             c.reason = REASON_DESTROY | reason;
         }
         self.send_to(card, Zone::GY);
+        self.events.push_back(DuelEvent {
+            code: EVENT_DESTROYED,
+            card,
+            reason: REASON_DESTROY | reason,
+        });
+        if reason & REASON_BATTLE != 0 {
+            self.events.push_back(DuelEvent {
+                code: EVENT_BATTLE_DESTROYED,
+                card,
+                reason: REASON_DESTROY | reason,
+            });
+        }
     }
 
     /// Put a card onto the field as a monster, **face-up in attack position**. A
