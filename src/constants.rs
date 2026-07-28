@@ -11,6 +11,7 @@ pub type DuelMessage = u8;
 pub const MSG_STARTUP: DuelMessage = 1;
 pub const MSG_NEW_TURN: DuelMessage = 2;
 pub const MSG_SELECT_CARD: DuelMessage = 3;
+pub const MSG_SELECT_YESNO: DuelMessage = 4;
 
 // Phase-entry messages — one per phase of a turn.
 pub const MSG_PHASE_DRAW: DuelMessage = 10;

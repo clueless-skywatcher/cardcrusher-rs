@@ -54,6 +54,7 @@ pub mod card;
 pub mod constants;
 pub mod duel;
 pub mod effect;
+pub mod event;
 pub mod field;
 pub mod group;
 pub mod ids;
@@ -62,7 +63,6 @@ pub mod processor;
 pub mod reason;
 pub mod script;
 pub mod zone;
-pub mod event;
 
 // Re-exported so shared constants are reachable as `cardcrusher::PLAYER_0`, etc.
 pub use constants::*;

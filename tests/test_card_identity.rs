@@ -19,7 +19,7 @@ use cardcrusher::{PLAYER_0, PLAYER_1};
 fn a_loaded_card_links_its_effect_to_its_code() {
     let mut duel = Duel::new();
 
-    duel.load_card("cards/ExampleSpell.lua")
+    duel.load_card("tests/fixtures/ExampleSpell.lua")
         .expect("ExampleSpell.lua should load");
 
     assert_eq!(
@@ -39,7 +39,7 @@ fn a_loaded_card_links_its_effect_to_its_code() {
 #[test]
 fn a_card_instance_finds_its_effects() {
     let mut duel = Duel::new();
-    duel.load_card("cards/ExampleSpell.lua")
+    duel.load_card("tests/fixtures/ExampleSpell.lua")
         .expect("ExampleSpell.lua should load");
 
     let card = duel.add_card(Card::new(12345678));
@@ -56,7 +56,7 @@ fn a_card_instance_finds_its_effects() {
 #[test]
 fn activating_a_cards_effect_runs_it() {
     let mut duel = Duel::new();
-    duel.load_card("cards/ExampleSpell.lua")
+    duel.load_card("tests/fixtures/ExampleSpell.lua")
         .expect("ExampleSpell.lua should load");
 
     let foe = duel.add_card(Card::new(0));
@@ -79,7 +79,7 @@ fn activating_a_cards_effect_runs_it() {
 #[test]
 fn a_false_condition_blocks_activation() {
     let mut duel = Duel::new();
-    duel.load_card("cards/CantActivate.lua")
+    duel.load_card("tests/fixtures/CantActivate.lua")
         .expect("CantActivate.lua should load");
 
     let card = duel.add_card(Card::new(11111111));

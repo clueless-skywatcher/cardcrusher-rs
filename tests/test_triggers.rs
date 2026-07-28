@@ -21,7 +21,7 @@ use cardcrusher::{
 
 /// Put the Avenger under `player`'s control on the field, and return its id.
 fn place_avenger(duel: &mut Duel, player: usize) -> cardcrusher::ids::CardId {
-    duel.load_card("cards/Avenger.lua")
+    duel.load_card("tests/fixtures/Avenger.lua")
         .expect("Avenger.lua should load");
     let avenger = duel.make_card(90000001);
     let id = duel.add_card(avenger);
@@ -46,8 +46,16 @@ fn if_trigger_fires_when_destroyed_by_battle() {
     duel.process_events();
 
     assert_eq!(duel.zone_of(avenger), Some(Zone::GY), "the Avenger is gone");
-    assert_eq!(duel.zone_of(foe1), Some(Zone::GY), "trigger wiped opp monster");
-    assert_eq!(duel.zone_of(foe2), Some(Zone::GY), "trigger wiped opp monster");
+    assert_eq!(
+        duel.zone_of(foe1),
+        Some(Zone::GY),
+        "trigger wiped opp monster"
+    );
+    assert_eq!(
+        duel.zone_of(foe2),
+        Some(Zone::GY),
+        "trigger wiped opp monster"
+    );
 }
 
 /// Destroyed by an *effect* (not battle), the "…by battle" trigger stays silent.
@@ -75,7 +83,7 @@ fn trigger_does_not_fire_on_non_battle_destruction() {
 #[test]
 fn trigger_with_false_condition_does_not_fire() {
     let mut duel = Duel::new();
-    duel.load_card("cards/DudTrigger.lua")
+    duel.load_card("tests/fixtures/DudTrigger.lua")
         .expect("DudTrigger.lua should load");
     let dud = duel.make_card(90000002);
     let dud = duel.add_card(dud);
@@ -126,13 +134,21 @@ fn battle_destruction_fires_trigger_end_to_end() {
     duel.set_response(&[0]);
     duel.process(); // resolve the battle (and, once wired, its triggers)
 
-    assert_eq!(duel.zone_of(avenger), Some(Zone::GY), "Avenger died in battle");
+    assert_eq!(
+        duel.zone_of(avenger),
+        Some(Zone::GY),
+        "Avenger died in battle"
+    );
     assert_eq!(
         duel.zone_of(attacker),
         Some(Zone::GY),
         "the Avenger's trigger wiped the attacker in revenge",
     );
-    assert_eq!(duel.life_points(PLAYER_1), 8000 - 1000, "2000 vs 1000 = 1000");
+    assert_eq!(
+        duel.life_points(PLAYER_1),
+        8000 - 1000,
+        "2000 vs 1000 = 1000"
+    );
 }
 
 // ===== Generic dispatch: subscribe by event code, drain covers every path =====
@@ -144,7 +160,7 @@ fn battle_destruction_fires_trigger_end_to_end() {
 #[test]
 fn any_destroy_trigger_fires_regardless_of_reason() {
     let mut duel = Duel::new();
-    duel.load_card("cards/Retaliator.lua")
+    duel.load_card("tests/fixtures/Retaliator.lua")
         .expect("Retaliator.lua should load");
     let retaliator = duel.make_card(90000003);
     let retaliator = duel.add_card(retaliator);
@@ -170,7 +186,7 @@ fn any_destroy_trigger_fires_regardless_of_reason() {
 #[test]
 fn a_generic_destroy_trigger_also_fires_on_battle() {
     let mut duel = Duel::new();
-    duel.load_card("cards/Retaliator.lua")
+    duel.load_card("tests/fixtures/Retaliator.lua")
         .expect("Retaliator.lua should load");
     let retaliator = duel.make_card(90000003);
     let retaliator = duel.add_card(retaliator);
@@ -196,9 +212,9 @@ fn a_generic_destroy_trigger_also_fires_on_battle() {
 #[test]
 fn an_effect_kill_fires_the_victims_trigger() {
     let mut duel = Duel::new();
-    duel.load_card("cards/ExampleSpell.lua")
+    duel.load_card("tests/fixtures/ExampleSpell.lua")
         .expect("ExampleSpell.lua should load");
-    duel.load_card("cards/Retaliator.lua")
+    duel.load_card("tests/fixtures/Retaliator.lua")
         .expect("Retaliator.lua should load");
 
     // P0 holds Example Spell and has a bystander monster; P1 controls Retaliator.

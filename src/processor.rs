@@ -61,6 +61,12 @@ pub enum Processor {
         attacker: CardId,
         player: usize,
     },
+    OptionalTrigger {
+        step: Step,
+        effect: usize,
+        card: CardId,
+        player: usize,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -80,6 +86,7 @@ impl Processor {
             Processor::Activate { .. } => true,
             Processor::BattleCommand { .. } => true,
             Processor::Attack { .. } => true,
+            Processor::OptionalTrigger { .. } => true,
         }
     }
 }

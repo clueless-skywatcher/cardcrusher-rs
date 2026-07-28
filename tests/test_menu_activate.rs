@@ -16,7 +16,7 @@ fn activating_an_effect_from_the_menu() {
     let mut duel = Duel::new();
     let foe = duel.add_card(Card::new(0));
     duel.place(PLAYER_1, foe, Zone::MonsterZone);
-    duel.load_card("cards/ExampleSpell.lua")
+    duel.load_card("tests/fixtures/ExampleSpell.lua")
         .expect("ExampleSpell.lua should load");
     // Player 0 holds the Example card.
     duel.add_to_hand(PLAYER_0, Card::new(12345678));
@@ -56,7 +56,7 @@ fn the_menu_reopens_after_activating() {
     let mut duel = Duel::new();
     let foe = duel.add_card(Card::new(0));
     duel.place(PLAYER_1, foe, Zone::MonsterZone);
-    duel.load_card("cards/ExampleSpell.lua")
+    duel.load_card("tests/fixtures/ExampleSpell.lua")
         .expect("ExampleSpell.lua should load");
     duel.add_to_hand(PLAYER_0, Card::new(12345678));
 
@@ -94,7 +94,7 @@ fn an_activated_spell_goes_to_field_then_graveyard() {
     let mut duel = Duel::new();
     let foe = duel.add_card(Card::new(0));
     duel.place(PLAYER_1, foe, Zone::MonsterZone);
-    duel.load_card("cards/ExampleSpell.lua")
+    duel.load_card("tests/fixtures/ExampleSpell.lua")
         .expect("ExampleSpell.lua should load");
     let spell = duel.add_to_hand(PLAYER_0, Card::new(12345678));
 

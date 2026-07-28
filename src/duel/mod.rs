@@ -78,7 +78,7 @@ pub struct Duel {
 
     pending: Option<(Thread, usize, CardId)>,
 
-    events: VecDeque<DuelEvent>
+    events: VecDeque<DuelEvent>,
 }
 
 impl Default for Duel {
@@ -128,7 +128,7 @@ impl Duel {
             card_data,
             effect_ctx,
             pending: None,
-            events: VecDeque::new()
+            events: VecDeque::new(),
         };
         duel.load_prelude();
         duel

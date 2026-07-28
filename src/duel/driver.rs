@@ -325,7 +325,6 @@ impl Duel {
                     if self.attack_targets(*player).is_empty() {
                         self.declare_attack(*attacker, None);
                         self.resolve_battle(*attacker, None);
-                        self.process_events();
                         self.reopen_battle_menu(*player);
                         true
                     } else {
@@ -340,8 +339,27 @@ impl Duel {
                     let target = self.attack_targets(*player).get(idx).copied();
                     self.declare_attack(*attacker, target);
                     self.resolve_battle(*attacker, target);
-                    self.process_events();
                     self.reopen_battle_menu(*player);
+                    true
+                }
+            },
+            Processor::OptionalTrigger {
+                step,
+                effect,
+                card,
+                player,
+            } => match step {
+                0 => {
+                    *step += 1;
+                    self.messages.push(MSG_SELECT_YESNO);
+                    false
+                }
+                _ => {
+                    if self.responses.first().copied() == Some(1) {
+                        self.effect_ctx.borrow_mut().activator = *player;
+                        let _ = self.resolve_effect(*effect);
+                    }
+                    let _ = card;
                     true
                 }
             },

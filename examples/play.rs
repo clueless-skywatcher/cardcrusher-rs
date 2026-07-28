@@ -25,6 +25,8 @@
 //! declare an attack, damage calc, direct attacks). No chains — that's later.
 
 use std::io::{self, Write};
+use std::thread::sleep;
+use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
@@ -42,8 +44,12 @@ use cardcrusher::{
     CMD_ACTIVATE, CMD_ATTACK, CMD_NEXT_PHASE, CMD_SUMMON, MSG_NEW_TURN, MSG_PHASE_BATTLE,
     MSG_PHASE_DRAW, MSG_PHASE_END, MSG_PHASE_MAIN1, MSG_PHASE_MAIN2, MSG_PHASE_STANDBY,
     MSG_SELECT_ATTACK_TARGET, MSG_SELECT_BATTLECMD, MSG_SELECT_CARD, MSG_SELECT_IDLECMD,
-    MSG_STARTUP,
+    MSG_SELECT_YESNO, MSG_STARTUP,
 };
+
+/// How long an automatic beat lingers on screen so a hotseat player can follow
+/// what the engine just did (a phase change, a resolved battle, a trigger).
+const BEAT: Duration = Duration::from_millis(450);
 
 fn main() {
     let mut duel = setup();
@@ -52,17 +58,29 @@ fn main() {
     {
         let _guard = TerminalGuard::new();
         let mut ui = Ui::new();
+        // Drive ONE step at a time (not process(), which runs silently to the next
+        // prompt). That lets us pause on internal steps — phase changes, resolved
+        // battles, trigger effects — so the player can watch them happen.
         loop {
-            match duel.process() {
+            match duel.step() {
                 DuelStatus::End => break,
-                // process() only ever returns Awaiting or End at the top level.
-                _ => match duel.messages().last().copied() {
+                // A prompt is waiting → run the matching menu.
+                DuelStatus::Awaiting => match duel.messages().last().copied() {
+                    Some(MSG_SELECT_YESNO) => yesno_menu(&mut duel, &mut ui),
                     Some(MSG_SELECT_IDLECMD) => main_phase_menu(&mut duel, &mut ui),
                     Some(MSG_SELECT_BATTLECMD) => battle_phase_menu(&mut duel, &mut ui),
                     Some(MSG_SELECT_ATTACK_TARGET) => select_attack_target(&mut duel, &mut ui),
                     Some(MSG_SELECT_CARD) => select_target(&mut duel, &mut ui),
                     _ => duel.set_response(&[0]), // shouldn't happen; keep moving
                 },
+                // The engine did internal work. If the board actually changed,
+                // linger on it for a beat; skip invisible bookkeeping steps.
+                DuelStatus::Continue => {
+                    let title = format!("… {}", current_phase_label(&duel));
+                    if render(&duel, &mut ui, &title, &[]) {
+                        sleep(BEAT);
+                    }
+                }
             }
         }
         game_over(&duel, &mut ui);
@@ -80,6 +98,7 @@ const BEAVER_WARRIOR: u32 = 32452818;
 const FERAL_IMP: u32 = 41392891;
 const MYSTICAL_ELF: u32 = 15025844;
 const EXAMPLE_SPELL: u32 = 12345678;
+const OPTIONAL_AVENGER: u32 = 90000005;
 
 fn setup() -> Duel {
     let mut duel = Duel::new();
@@ -101,18 +120,29 @@ fn setup() -> Duel {
     duel.add_to_hand(0, imp);
     let kuriboh = duel.make_card(KURIBOH);
     duel.add_to_hand(0, kuriboh);
-    let foe = duel.make_card(BEAVER_WARRIOR); // on the opponent's field
+    // Optional Avenger (1000 ATK): summon it, ram it into the stronger Beaver
+    // Warrior below, and its OPTIONAL "when destroyed" trigger fires — the
+    // yes/no prompt. Yes wipes the opponent's board.
+    let avenger = duel.make_card(OPTIONAL_AVENGER);
+    duel.add_to_hand(0, avenger);
+
+    let foe = duel.make_card(FERAL_IMP); // on the opponent's field
     let foe = duel.add_card(foe);
     duel.place(1, foe, Zone::MonsterZone);
+    // Face-up attack so an attack into it is ATK-vs-ATK (1200 > 1000) and kills
+    // the Avenger — a face-down/positionless wall wouldn't destroy the attacker.
+    duel.change_position(foe, Position::FaceUpAttack);
     duel
 }
 
-/// Load every card script in `cards/` at startup — the demo's "card database".
-/// Sorted before loading so the load order (and thus effect registration) is
-/// deterministic regardless of how the filesystem lists the directory.
+/// Load every card script at startup — the demo's "card database". Real cards
+/// live in `cards/`; the made-up demo/test cards (Example Spell, Optional
+/// Avenger, …) live in `tests/fixtures/`. Sorted before loading so the load
+/// order (and thus effect registration) is deterministic.
 fn load_all_cards(duel: &mut Duel) {
-    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir("cards")
-        .expect("read the cards/ directory")
+    let mut paths: Vec<std::path::PathBuf> = ["cards", "tests/fixtures"]
+        .iter()
+        .flat_map(|dir| std::fs::read_dir(dir).unwrap_or_else(|_| panic!("read {dir}/")))
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("lua"))
         .collect();
@@ -213,12 +243,16 @@ impl Screen {
     }
 
     /// Write only the changed rows to the terminal, grouping equal-style runs.
-    fn flush(&mut self, out: &mut impl Write) {
+    /// Returns whether any row differed from the previous frame (used to decide
+    /// if an automatic beat is worth pausing on).
+    fn flush(&mut self, out: &mut impl Write) -> bool {
+        let mut changed = false;
         for y in 0..self.h {
             let row = &self.cur[y * self.w..(y + 1) * self.w];
             if row == &self.prev[y * self.w..(y + 1) * self.w] {
                 continue; // unchanged → don't touch it (this is what kills flicker)
             }
+            changed = true;
             let _ = queue!(out, cursor::MoveTo(0, y as u16));
             let mut i = 0;
             while i < self.w {
@@ -249,6 +283,7 @@ impl Screen {
         }
         let _ = out.flush();
         self.prev.clone_from(&self.cur);
+        changed
     }
 }
 
@@ -594,7 +629,8 @@ fn draw_board(scr: &mut Screen, duel: &Duel, focus: Focus, cursor: (usize, usize
     draw_header(scr, YOU_HDR_Y, duel, you, "You");
 }
 
-fn render(duel: &Duel, ui: &mut Ui, title: &str, items: &[Item]) {
+/// Draw the board + menu. Returns whether the frame changed since the last one.
+fn render(duel: &Duel, ui: &mut Ui, title: &str, items: &[Item]) -> bool {
     let you = current(duel);
     let focused = focused_card(duel, ui, items);
 
@@ -666,7 +702,7 @@ fn render(duel: &Duel, ui: &mut Ui, title: &str, items: &[Item]) {
         draw_hand_panel(scr, duel, you, y);
     }
 
-    scr.flush(&mut io::stdout());
+    scr.flush(&mut io::stdout())
 }
 
 /// The card whose details the right panel should show: the slot under the
@@ -960,18 +996,30 @@ fn view_items(you: usize) -> Vec<Item> {
     ]
 }
 
+/// A yes/no prompt — currently only an optional trigger asking its controller
+/// whether to activate. Response `[1]` = yes, `[0]` = no.
+fn yesno_menu(duel: &mut Duel, ui: &mut Ui) {
+    let items = vec![respond("Yes", vec![1]), respond("No", vec![0])];
+    let bytes = run_menu(duel, ui, "Activate the optional effect?", &items);
+    duel.set_response(&bytes);
+}
+
 fn main_phase_menu(duel: &mut Duel, ui: &mut Ui) {
     let you = current(duel);
     let mut items = vec![respond("Go to next phase", vec![CMD_NEXT_PHASE])];
 
-    for i in 0..duel.hand_count(you) {
-        if let Some(id) = duel.hand_card(you, i) {
-            if is_monster(duel, id) {
-                items.push(respond_card(
-                    format!("Summon {}", name_of(duel, id)),
-                    vec![CMD_SUMMON, i as u8],
-                    id,
-                ));
+    // Only offer summons while the once-per-turn Normal Summon is still available
+    // — after using it, these options can't do anything, so hide them.
+    if duel.can_normal_summon(you) {
+        for i in 0..duel.hand_count(you) {
+            if let Some(id) = duel.hand_card(you, i) {
+                if is_monster(duel, id) {
+                    items.push(respond_card(
+                        format!("Summon {}", name_of(duel, id)),
+                        vec![CMD_SUMMON, i as u8],
+                        id,
+                    ));
+                }
             }
         }
     }

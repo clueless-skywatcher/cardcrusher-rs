@@ -4,14 +4,11 @@
 //! effect table as both `self` and `e`; its verbs record intents into the shared
 //! context, and we apply those to the real duel ("describe, then execute").
 
-use mlua::Table;
 use mlua::thread::ThreadStatus;
 
 use crate::effect::{CostType, EffectKind};
-use crate::event::DuelEvent;
 use crate::ids::CardId;
-use crate::processor::DuelStatus;
-use crate::reason::REASON_BATTLE;
+use crate::processor::{DuelStatus, Processor};
 use crate::zone::Zone;
 
 use super::Duel;
@@ -242,9 +239,36 @@ impl Duel {
     ) {
         self.effect_ctx.borrow_mut().activator = player;
         for (slot, effect) in self.effects_of(card).iter().enumerate() {
-            if self.effect_kind(effect) == want && self.check_condition(effect).unwrap_or(false) {
+            if self.effect_kind(effect) == want
+                && self.check_condition(effect).unwrap_or(false)
+                && self.has_legal_target(effect)
+            {
                 out.push((card, slot));
             }
+        }
+    }
+
+    /// Whether this effect's `target` stage finds at least one legal candidate.
+    /// Runs it on a scratch coroutine (read-only probe): if it yields asking for a
+    /// selection, the candidate set must be non-empty; if it never asks, there's
+    /// nothing to target → always activatable (e.g. Pot of Greed).
+    fn has_legal_target(&self, effect: &mlua::Table) -> bool {
+        let Ok(target_func) = effect.get::<mlua::Function>("target") else {
+            return true;
+        };
+        let Ok(thread) = self.vm.create_thread(target_func) else {
+            return true;
+        };
+        self.effect_ctx.borrow_mut().candidates.clear();
+        if thread
+            .resume::<mlua::Value>((effect.clone(), effect.clone()))
+            .is_err()
+        {
+            return true;
+        }
+        match thread.status() {
+            ThreadStatus::Resumable => !self.effect_ctx.borrow().candidates.is_empty(),
+            _ => true,
         }
     }
 
@@ -285,19 +309,34 @@ impl Duel {
             };
             let card_code = card.code;
             let player = self.controller_of(event.card);
-            let indexes: Vec<usize> = self.effects.borrow().iter().enumerate()
-                .filter(|(_, (code, t))| 
+            let indexes: Vec<usize> = self
+                .effects
+                .borrow()
+                .iter()
+                .enumerate()
+                .filter(|(_, (code, t))| {
                     *code == card_code
-                    && self.effect_kind(t) == EffectKind::Trigger
-                    && t.get::<u32>("event").unwrap_or(0) == event.code
-                )
+                        && self.effect_kind(t) == EffectKind::Trigger
+                        && t.get::<u32>("event").unwrap_or(0) == event.code
+                })
                 .map(|(i, _)| i)
                 .collect();
 
             for idx in indexes {
                 self.effect_ctx.borrow_mut().activator = player;
                 let t = self.effects.borrow()[idx].1.clone();
-                if self.check_condition(&t).unwrap_or(false) {
+                if !self.check_condition(&t).unwrap_or(false) {
+                    continue;
+                }
+                if t.get::<bool>("optional").unwrap_or(false) {
+                    self.processor_stack.push(Processor::OptionalTrigger {
+                        step: 0,
+                        effect: idx,
+                        card: event.card,
+                        player,
+                    });
+                } else {
+                    self.effect_ctx.borrow_mut().activator = player;
                     let _ = self.resolve_effect(idx);
                 }
             }
