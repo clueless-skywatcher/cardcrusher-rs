@@ -25,6 +25,7 @@ use mlua::{Lua, Table, Thread};
 use slotmap::SlotMap;
 
 use crate::card::{Card, CardData};
+use crate::chain::ChainLink;
 use crate::constants::DuelMessage;
 use crate::effect::EffectContext;
 use crate::event::DuelEvent;
@@ -79,6 +80,8 @@ pub struct Duel {
     pending: Option<(Thread, usize, CardId)>,
 
     events: VecDeque<DuelEvent>,
+
+    chain: Vec<ChainLink>,
 }
 
 impl Default for Duel {
@@ -129,6 +132,7 @@ impl Duel {
             effect_ctx,
             pending: None,
             events: VecDeque::new(),
+            chain: Vec::new(),
         };
         duel.load_prelude();
         duel

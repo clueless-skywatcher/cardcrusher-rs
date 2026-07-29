@@ -261,6 +261,8 @@ impl Duel {
                             step: 0,
                             player: *player,
                         });
+                        self.processor_stack
+                            .push(Processor::ResolveChain { step: 0 });
                         true
                     }
                 },
@@ -274,6 +276,8 @@ impl Duel {
                         step: 0,
                         player: *player,
                     });
+                    self.processor_stack
+                        .push(Processor::ResolveChain { step: 0 });
                     true
                 }
             },
@@ -363,6 +367,11 @@ impl Duel {
                     true
                 }
             },
+            Processor::ResolveChain { .. } => {
+                self.resolve_chain();
+                true
+            }
+            Processor::ChainResponse { .. } => todo!(),
         }
     }
 
@@ -371,5 +380,9 @@ impl Duel {
     fn reopen_battle_menu(&mut self, player: usize) {
         self.processor_stack
             .push(Processor::BattleCommand { step: 0, player });
+    }
+
+    pub fn chain_length(&self) -> usize {
+        self.chain.len()
     }
 }

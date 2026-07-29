@@ -6,6 +6,7 @@
 
 use mlua::thread::ThreadStatus;
 
+use crate::chain::ChainLink;
 use crate::effect::{CostType, EffectKind};
 use crate::ids::CardId;
 use crate::processor::{DuelStatus, Processor};
@@ -138,11 +139,12 @@ impl Duel {
                 if is_spell {
                     self.send_to(card, Zone::SpellTrapZone);
                 }
-                self.resolve_effect(idx)?;
-                if is_spell {
-                    // Once resolved, a Spell/Trap is sent to the GY by rule.
-                    self.send_to(card, Zone::GY);
-                }
+                self.chain.push(ChainLink {
+                    activator: player,
+                    effect_seq: idx,
+                    targets: self.effect_ctx.borrow().targets.clone(),
+                    card,
+                });
                 Ok(DuelStatus::End)
             }
         }
@@ -172,19 +174,14 @@ impl Duel {
             .pending
             .take()
             .expect("nothing is awaiting a selection");
-        let is_spell = self
-            .effects
-            .borrow()
-            .get(index)
-            .map(|(_, t)| self.effect_kind(t))
-            == Some(EffectKind::Activate);
         let chosen = crate::effect::encode_ids(&self.effect_ctx.borrow().targets);
         thread.resume::<mlua::Value>(chosen)?;
-        self.resolve_effect(index)?;
-        if is_spell {
-            // Once resolved, a Spell/Trap is sent to the GY by rule.
-            self.send_to(card, Zone::GY);
-        }
+        self.chain.push(ChainLink {
+            effect_seq: index,
+            card,
+            activator: self.effect_ctx.borrow().activator,
+            targets: self.effect_ctx.borrow().targets.clone(),
+        });
         Ok(DuelStatus::End)
     }
 
@@ -273,7 +270,7 @@ impl Duel {
     }
 
     /// An effect's declared kind (read from its Lua table; defaults to Activate).
-    fn effect_kind(&self, effect: &mlua::Table) -> EffectKind {
+    pub fn effect_kind(&self, effect: &mlua::Table) -> EffectKind {
         EffectKind::from_code(effect.get::<u32>("kind").unwrap_or(0))
     }
 
@@ -339,6 +336,28 @@ impl Duel {
                     self.effect_ctx.borrow_mut().activator = player;
                     let _ = self.resolve_effect(idx);
                 }
+            }
+        }
+    }
+
+    pub fn resolve_chain(&mut self) {
+        while let Some(link) = self.chain.pop() {
+            {
+                let mut ctx = self.effect_ctx.borrow_mut();
+                ctx.activator = link.activator;
+                ctx.targets = link.targets;
+            }
+
+            let _ = self.resolve_effect(link.effect_seq);
+
+            let is_spell = self
+                .effects
+                .borrow()
+                .get(link.effect_seq)
+                .map(|(_, t)| self.effect_kind(t))
+                == Some(EffectKind::Activate);
+            if is_spell {
+                self.send_to(link.card, Zone::GY);
             }
         }
     }

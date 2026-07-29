@@ -12,6 +12,7 @@ pub const MSG_STARTUP: DuelMessage = 1;
 pub const MSG_NEW_TURN: DuelMessage = 2;
 pub const MSG_SELECT_CARD: DuelMessage = 3;
 pub const MSG_SELECT_YESNO: DuelMessage = 4;
+pub const MSG_SELECT_CHAIN: DuelMessage = 5;
 
 // Phase-entry messages — one per phase of a turn.
 pub const MSG_PHASE_DRAW: DuelMessage = 10;
@@ -38,3 +39,4 @@ pub const CMD_ACTIVATE: Command = 5;
 /// Declare an attack — response is `[CMD_ATTACK, attacker_index]`.
 pub const CMD_ATTACK: Command = 7;
 pub const CMD_SET_SPELL_TRAP: Command = 9;
+pub const CMD_PASS: Command = 10;

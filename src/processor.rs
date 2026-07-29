@@ -67,6 +67,13 @@ pub enum Processor {
         card: CardId,
         player: usize,
     },
+    ResolveChain {
+        step: usize,
+    },
+    ChainResponse {
+        step: usize,
+        player: usize,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -87,6 +94,8 @@ impl Processor {
             Processor::BattleCommand { .. } => true,
             Processor::Attack { .. } => true,
             Processor::OptionalTrigger { .. } => true,
+            Processor::ResolveChain { .. } => false,
+            Processor::ChainResponse { .. } => true,
         }
     }
 }

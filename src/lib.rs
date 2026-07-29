@@ -51,6 +51,7 @@
 //! - [`duel`]      — the whole game; the box that owns every other room.
 
 pub mod card;
+pub mod chain;
 pub mod constants;
 pub mod duel;
 pub mod effect;

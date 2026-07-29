@@ -71,6 +71,7 @@ fn activating_a_cards_effect_runs_it() {
     );
     duel.answer_selection(vec![0]);
     duel.resume().expect("resume should run");
+    duel.resolve_chain(); // activation only builds the chain now; resolve it
     assert_eq!(duel.zone_of(foe), Some(Zone::GY));
 }
 

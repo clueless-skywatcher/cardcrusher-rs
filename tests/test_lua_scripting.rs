@@ -144,6 +144,7 @@ fn activating_targets_and_destroys_an_opponent_monster() {
     // Pick candidate index 0 (the opponent's only monster) → resolve → destroy.
     duel.answer_selection(vec![0]);
     assert_eq!(duel.resume().expect("resume should run"), DuelStatus::End);
+    duel.resolve_chain(); // activation only builds the chain now; resolve it
     assert_eq!(
         duel.zone_of(foe),
         Some(Zone::GY),
@@ -170,6 +171,7 @@ fn opponent_is_relative_to_the_activating_player() {
     );
     duel.answer_selection(vec![0]);
     duel.resume().expect("resume should run");
+    duel.resolve_chain(); // activation only builds the chain now; resolve it
 
     assert_eq!(
         duel.zone_of(mine),
