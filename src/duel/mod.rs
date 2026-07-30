@@ -161,9 +161,12 @@ impl Duel {
                 code,
                 CardData {
                     card_type: data.get("type").unwrap_or(0),
+                    // Absent (nil) → None; present → Some(value).
+                    spell_type: data.get::<Option<u32>>("spell_type").unwrap_or(None),
+                    trap_type: data.get::<Option<u32>>("trap_type").unwrap_or(None),
                     atk: data.get("atk").unwrap_or(0),
                     def: data.get("def").unwrap_or(0),
-                    level: data.get("level").unwrap_or(0),
+                    level: data.get::<Option<u32>>("level").unwrap_or(None),
                     attribute: data.get("attribute").unwrap_or(0),
                     race: data.get("race").unwrap_or(0),
                     text: data.get("text").unwrap_or_default(),
@@ -183,11 +186,13 @@ impl Duel {
         // every build runs the byte-identical prelude (determinism). Constant
         // tables load first; the base classes (`base.lua`) load last and may use
         // them. Cards are loaded later still and rely on all of it.
-        const PRELUDE: [(&str, &str); 8] = [
+        const PRELUDE: [(&str, &str); 10] = [
             ("players", include_str!("prelude/players.lua")),
             ("effect_kinds", include_str!("prelude/effect_kinds.lua")),
             ("categories", include_str!("prelude/categories.lua")),
             ("card_types", include_str!("prelude/card_types.lua")),
+            ("spell_types", include_str!("prelude/spell_types.lua")),
+            ("trap_types", include_str!("prelude/trap_types.lua")),
             ("attributes", include_str!("prelude/attributes.lua")),
             ("races", include_str!("prelude/races.lua")),
             ("base", include_str!("prelude/base.lua")),

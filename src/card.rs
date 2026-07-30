@@ -24,12 +24,17 @@
 pub struct CardData {
     /// Card type: `TYPE_MONSTER | TYPE_NORMAL | …` (a bitmask).
     pub card_type: u32,
+    /// Spell subtype (`SPELL_*`) — `None` unless this card is a Spell.
+    pub spell_type: Option<u32>,
+    /// Trap subtype (`TRAP_*`) — `None` unless this card is a Trap.
+    pub trap_type: Option<u32>,
     /// Attack (signed: −2 means "?").
     pub atk: i32,
     /// Defense (signed: −2 means "?").
     pub def: i32,
-    /// Monster level/rank.
-    pub level: u32,
+    /// Level / rank / link rating (one shared slot, as in EDOPro) — `None` for
+    /// non-monsters (Spells/Traps).
+    pub level: Option<u32>,
     /// Attribute: `ATTRIBUTE_EARTH | …` (a bitmask; monsters have exactly one).
     pub attribute: u32,
     /// Monster Type ("race" in EDOPro): `RACE_WARRIOR | …` (a bitmask).

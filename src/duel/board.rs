@@ -46,9 +46,10 @@ impl Duel {
         self.get_card(card).map(|c| c.data.def)
     }
 
-    /// A monster's level (for tribute/level checks later).
+    /// A monster's level (for tribute/level checks later). `None` if the card
+    /// doesn't exist *or* has no level (Spells/Traps).
     pub fn level_of(&self, card: CardId) -> Option<u32> {
-        self.get_card(card).map(|c| c.data.level)
+        self.get_card(card).and_then(|c| c.data.level)
     }
 
     pub fn get_card(&self, id: CardId) -> Option<&Card> {

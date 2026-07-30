@@ -743,7 +743,11 @@ fn draw_card_panel(scr: &mut Screen, id: CardId, duel: &Duel, top_y: u16) -> u16
             Color::Green,
             false,
         ));
-        lines.push((format!("Level {}", data.level), Color::Grey, false));
+        lines.push((
+            format!("Level {}", data.level.unwrap_or(0)),
+            Color::Grey,
+            false,
+        ));
         lines.push((
             format!(
                 "{} · {}",
