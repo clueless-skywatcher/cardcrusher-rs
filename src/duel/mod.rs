@@ -82,6 +82,11 @@ pub struct Duel {
     events: VecDeque<DuelEvent>,
 
     chain: Vec<ChainLink>,
+
+    passes: [bool; 2],
+    /// The player whose chain-response window is currently open (for the UI to
+    /// show *whose* turn it is to respond, and their chainable options).
+    responder: usize,
 }
 
 impl Default for Duel {
@@ -133,6 +138,8 @@ impl Duel {
             pending: None,
             events: VecDeque::new(),
             chain: Vec::new(),
+            passes: [false, false],
+            responder: 0,
         };
         duel.load_prelude();
         duel
@@ -186,13 +193,14 @@ impl Duel {
         // every build runs the byte-identical prelude (determinism). Constant
         // tables load first; the base classes (`base.lua`) load last and may use
         // them. Cards are loaded later still and rely on all of it.
-        const PRELUDE: [(&str, &str); 10] = [
+        const PRELUDE: [(&str, &str); 11] = [
             ("players", include_str!("prelude/players.lua")),
             ("effect_kinds", include_str!("prelude/effect_kinds.lua")),
             ("categories", include_str!("prelude/categories.lua")),
             ("card_types", include_str!("prelude/card_types.lua")),
             ("spell_types", include_str!("prelude/spell_types.lua")),
             ("trap_types", include_str!("prelude/trap_types.lua")),
+            ("zones", include_str!("prelude/zones.lua")),
             ("attributes", include_str!("prelude/attributes.lua")),
             ("races", include_str!("prelude/races.lua")),
             ("base", include_str!("prelude/base.lua")),

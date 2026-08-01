@@ -6,7 +6,20 @@ use cardcrusher::card::Card;
 use cardcrusher::duel::Duel;
 use cardcrusher::processor::DuelStatus;
 use cardcrusher::zone::Zone;
-use cardcrusher::{CMD_ACTIVATE, MSG_SELECT_IDLECMD, PLAYER_0, PLAYER_1};
+use cardcrusher::{
+    CMD_ACTIVATE, CMD_PASS, MSG_SELECT_CHAIN, MSG_SELECT_IDLECMD, PLAYER_0, PLAYER_1,
+};
+
+/// After an activation, the chain opens a response window; pass every window so
+/// the chain resolves. Returns the status of the final `process()`.
+fn pass_windows(duel: &mut Duel) -> DuelStatus {
+    let mut status = DuelStatus::Awaiting;
+    while duel.messages().last() == Some(&MSG_SELECT_CHAIN) {
+        duel.set_response(&[CMD_PASS]);
+        status = duel.process();
+    }
+    status
+}
 
 /// Menu → "activate the card in hand slot 0" → its target freezes for a pick →
 /// answer → resolve → the target is destroyed. Response encoding:
@@ -38,9 +51,11 @@ fn activating_an_effect_from_the_menu() {
         "nothing destroyed while still choosing"
     );
 
-    // Pick candidate index 0 → resume → resolve → destroy.
+    // Pick candidate index 0 → resume → response window opens.
     duel.set_response(&[0]);
     duel.process();
+    // Pass the response window(s) → the chain resolves → destroy.
+    pass_windows(&mut duel);
     assert_eq!(
         duel.zone_of(foe),
         Some(Zone::GY),
@@ -67,7 +82,8 @@ fn the_menu_reopens_after_activating() {
     duel.process(); // → target selection
 
     duel.set_response(&[0]);
-    let status = duel.process(); // resolve → should re-open the menu
+    duel.process(); // → response window opens
+    let status = pass_windows(&mut duel); // pass → resolve → should re-open the menu
 
     assert_eq!(
         duel.zone_of(foe),
@@ -110,9 +126,10 @@ fn an_activated_spell_goes_to_field_then_graveyard() {
         "the activated Spell is on the field while it resolves"
     );
 
-    // Resolve: the Spell is sent to the graveyard.
+    // Resolve: pick the target, pass the response window(s) → Spell → graveyard.
     duel.set_response(&[0]);
     duel.process();
+    pass_windows(&mut duel);
     assert_eq!(
         duel.zone_of(spell),
         Some(Zone::GY),

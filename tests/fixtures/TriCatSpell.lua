@@ -3,7 +3,8 @@
 -- single effect). We store them as a list rather than an OR'd bitmask.
 
 TriCatSpell = Card:new(90000004, {
-    type = TYPE_SPELL | TYPE_NORMAL,
+    type = TYPE_SPELL,
+    spell_type = SPELL_NORMAL,
     name = "Tri-Cat Spell",
     text = "(test) One effect advertising three categories.",
 })

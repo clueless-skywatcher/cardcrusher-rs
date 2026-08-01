@@ -40,3 +40,4 @@ pub const CMD_ACTIVATE: Command = 5;
 pub const CMD_ATTACK: Command = 7;
 pub const CMD_SET_SPELL_TRAP: Command = 9;
 pub const CMD_PASS: Command = 10;
+pub const CMD_RESPONSE: Command = 11;

@@ -58,6 +58,13 @@ impl Field {
         let controller = self.controller_of(card).unwrap_or(0);
         self.remove_from_pile(card);
         self.locations.insert(card, (controller, zone));
+        // Symmetric to `remove_from_pile`: a card entering an ordered pile
+        // (deck/hand) must join it, or `hand_count`/`hand_card` won't see it.
+        match zone {
+            Zone::Deck => self.decks[controller].push(card),
+            Zone::Hand => self.hands[controller].push(card),
+            _ => {}
+        }
     }
 
     /// If the card currently lives in a per-player ordered pile (deck/hand), pull

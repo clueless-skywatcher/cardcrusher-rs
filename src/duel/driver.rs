@@ -263,6 +263,10 @@ impl Duel {
                         });
                         self.processor_stack
                             .push(Processor::ResolveChain { step: 0 });
+                        self.processor_stack.push(Processor::ChainResponse {
+                            step: 0,
+                            player: 1 - *player,
+                        });
                         true
                     }
                 },
@@ -278,6 +282,10 @@ impl Duel {
                     });
                     self.processor_stack
                         .push(Processor::ResolveChain { step: 0 });
+                    self.processor_stack.push(Processor::ChainResponse {
+                        step: 0,
+                        player: 1 - *player,
+                    });
                     true
                 }
             },
@@ -371,7 +379,45 @@ impl Duel {
                 self.resolve_chain();
                 true
             }
-            Processor::ChainResponse { .. } => todo!(),
+            Processor::ChainResponse { step, player } => match step {
+                0 => {
+                    self.responder = *player; // whose window this is (for the UI)
+                    self.messages.push(MSG_SELECT_CHAIN);
+                    *step += 1;
+                    false
+                }
+                _ => {
+                    let response = self.responses[0];
+                    match response {
+                        CMD_PASS => {
+                            self.passes[*player] = true;
+                            if self.passes[1 - *player] {
+                                true
+                            } else {
+                                self.processor_stack.push(Processor::ChainResponse {
+                                    step: 0,
+                                    player: 1 - *player,
+                                });
+                                true
+                            }
+                        }
+                        CMD_RESPONSE => {
+                            let effect_index = self.responses[1] as usize;
+                            let top = self.chain.last().expect("a response needs a chain");
+                            let (card, slot) = self.chainable_effects(*player, top)[effect_index];
+                            // `activate` funnels through `push_chain_link`, which
+                            // resets `passes` — no need to reset again here.
+                            let _ = self.activate(card, slot, *player);
+                            self.processor_stack.push(Processor::ChainResponse {
+                                step: 0,
+                                player: 1 - *player,
+                            });
+                            true
+                        }
+                        _ => true,
+                    }
+                }
+            },
         }
     }
 

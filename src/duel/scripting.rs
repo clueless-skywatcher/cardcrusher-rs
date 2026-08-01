@@ -7,7 +7,7 @@
 use mlua::thread::ThreadStatus;
 
 use crate::chain::ChainLink;
-use crate::effect::{CostType, EffectKind};
+use crate::effect::{spell_speed, CostType, EffectKind};
 use crate::ids::CardId;
 use crate::processor::{DuelStatus, Processor};
 use crate::zone::Zone;
@@ -73,6 +73,7 @@ impl Duel {
         resolve_func.call::<()>((effect_table.clone(), effect_table))?;
 
         self.handle_destroys();
+        self.handle_moves();
         Ok(())
     }
 
@@ -139,12 +140,8 @@ impl Duel {
                 if is_spell {
                     self.send_to(card, Zone::SpellTrapZone);
                 }
-                self.chain.push(ChainLink {
-                    activator: player,
-                    effect_seq: idx,
-                    targets: self.effect_ctx.borrow().targets.clone(),
-                    card,
-                });
+                let targets = self.effect_ctx.borrow().targets.clone();
+                self.push_chain_link(idx, card, player, targets);
                 Ok(DuelStatus::End)
             }
         }
@@ -176,13 +173,30 @@ impl Duel {
             .expect("nothing is awaiting a selection");
         let chosen = crate::effect::encode_ids(&self.effect_ctx.borrow().targets);
         thread.resume::<mlua::Value>(chosen)?;
-        self.chain.push(ChainLink {
-            effect_seq: index,
-            card,
-            activator: self.effect_ctx.borrow().activator,
-            targets: self.effect_ctx.borrow().targets.clone(),
-        });
+        let activator = self.effect_ctx.borrow().activator;
+        let targets = self.effect_ctx.borrow().targets.clone();
+        self.push_chain_link(index, card, activator, targets);
         Ok(DuelStatus::End)
+    }
+
+    /// Add a link to the chain and reset the response-window pass tracking. Every
+    /// new link (link 1 or a chained response) re-opens the window for both
+    /// players, so `passes` goes back to `[false, false]`. Funnel all chain adds
+    /// through here so the reset can't be forgotten.
+    fn push_chain_link(
+        &mut self,
+        effect_seq: usize,
+        card: CardId,
+        activator: usize,
+        targets: Vec<CardId>,
+    ) {
+        self.chain.push(ChainLink {
+            effect_seq,
+            card,
+            activator,
+            targets,
+        });
+        self.passes = [false, false];
     }
 
     pub fn code_effects(&self, code: u32) -> Vec<mlua::Table> {
@@ -225,6 +239,38 @@ impl Duel {
         out
     }
 
+    /// The spell speed (0..3) of a chain link — its effect's kind + owning card's
+    /// type/subtype, fed to `spell_speed`. Takes `&ChainLink` so a caller can pass
+    /// `self.chain.last()` straight in. Used to gate responses against the top link.
+    pub fn speed_of(&self, link: &ChainLink) -> u8 {
+        let Some(data) = self.card_data(link.card) else {
+            return 0; // card gone → treat as non-chainable
+        };
+        let kind = self.effect_kind(&self.effects.borrow()[link.effect_seq].1);
+        spell_speed(kind, data.card_type, data.spell_type, data.trap_type)
+    }
+
+    /// The effects `player` may activate **in response** to the current chain: the
+    /// `activatable_effects` checks plus the spell-speed gate (`>= 2` and `>= the
+    /// top link's speed`). `chain_link` is the top link. Hand `ACTIVATE` only for
+    /// now — field `QUICK` effects (also speed 2) join here next rung; `IGNITION`
+    /// (speed 1) can never chain, so there's no monster loop yet.
+    pub fn chainable_effects(&self, player: usize, chain_link: &ChainLink) -> Vec<(CardId, usize)> {
+        let top_speed = self.speed_of(chain_link); // constant across all candidates
+        let hand: Vec<CardId> = {
+            let f = self.field.borrow();
+            (0..f.hand_count(player))
+                .filter_map(|i| f.hand_card(player, i))
+                .collect()
+        };
+
+        let mut out = Vec::new();
+        for card in hand {
+            self.collect_chainable(top_speed, card, EffectKind::Activate, player, &mut out);
+        }
+        out
+    }
+
     /// Append `(card, slot)` for each of `card`'s effects of kind `want` whose
     /// `condition` currently passes.
     fn collect_activatable(
@@ -237,6 +283,34 @@ impl Duel {
         self.effect_ctx.borrow_mut().activator = player;
         for (slot, effect) in self.effects_of(card).iter().enumerate() {
             if self.effect_kind(effect) == want
+                && self.check_condition(effect).unwrap_or(false)
+                && self.has_legal_target(effect)
+            {
+                out.push((card, slot));
+            }
+        }
+    }
+
+    /// Like `collect_activatable`, but keeps only effects whose spell speed passes
+    /// the response gate: `>= 2` (SS1 never responds) and `>= top_speed`.
+    fn collect_chainable(
+        &self,
+        top_speed: u8,
+        card: CardId,
+        want: EffectKind,
+        player: usize,
+        out: &mut Vec<(CardId, usize)>,
+    ) {
+        let Some(data) = self.card_data(card) else {
+            return;
+        };
+        self.effect_ctx.borrow_mut().activator = player;
+        for (slot, effect) in self.effects_of(card).iter().enumerate() {
+            let kind = self.effect_kind(effect);
+            let speed = spell_speed(kind, data.card_type, data.spell_type, data.trap_type);
+            if speed >= 2
+                && speed >= top_speed
+                && kind == want
                 && self.check_condition(effect).unwrap_or(false)
                 && self.has_legal_target(effect)
             {
@@ -283,6 +357,15 @@ impl Duel {
         }
     }
 
+    /// Apply the effect's `send` intents — plain relocations, NOT destructions
+    /// (no reason stamped, no `EVENT_DESTROYED`).
+    fn handle_moves(&mut self) {
+        let to_move: Vec<(CardId, Zone)> = self.effect_ctx.borrow_mut().to_move.drain(..).collect();
+        for (card, zone) in to_move {
+            self.send_to(card, zone);
+        }
+    }
+
     fn effect_index(&self, card: CardId, slot: usize) -> Option<usize> {
         let code = self.get_card(card)?.code;
         self.effects
@@ -299,7 +382,15 @@ impl Duel {
         cond.call::<bool>((effect.clone(), effect.clone()))
     }
 
+    /// Drain the event queue: every fired TRIGGER goes ON THE CHAIN (C4), and when
+    /// several fire at once they're ordered by **SEGOC** (C5) — collect all fired
+    /// mandatory triggers, sort them turn-player-first, then build the links. (See
+    /// `docs/segoc.md`.) Optionals still resolve via the inline `OptionalTrigger`
+    /// yes/no; SEGOC-ordering them is deferred.
     pub fn process_events(&mut self) {
+        let turn_player = self.turn_hist.last().copied().unwrap_or(0);
+        let mut fired: Vec<(usize, CardId, usize)> = Vec::new(); // (effect, card, controller)
+
         while let Some(event) = self.events.pop_front() {
             let Some(card) = self.get_card(event.card) else {
                 continue;
@@ -333,10 +424,50 @@ impl Duel {
                         player,
                     });
                 } else {
-                    self.effect_ctx.borrow_mut().activator = player;
-                    let _ = self.resolve_effect(idx);
+                    fired.push((idx, event.card, player));
                 }
             }
+        }
+
+        // SEGOC: the turn player's triggers are placed first. A STABLE sort keeps
+        // each player's triggers in event order (our stand-in for "the player
+        // chooses their own order"). No targets yet — targeting triggers deferred.
+        fired.sort_by_key(|&(_, _, player)| player != turn_player);
+        for &(idx, card, player) in &fired {
+            self.push_chain_link(idx, card, player, Vec::new());
+        }
+
+        // Any links built → resolve them through the chain: open the response
+        // window (opponent of the turn player responds first), then ResolveChain
+        // unwinds LIFO — the same machinery as an activation.
+        if !fired.is_empty() {
+            self.processor_stack
+                .push(Processor::ResolveChain { step: 0 });
+            self.processor_stack.push(Processor::ChainResponse {
+                step: 0,
+                player: 1 - turn_player,
+            });
+        }
+    }
+
+    /// The controller of each link on the chain, in chain order (link 1 first).
+    /// Used to observe SEGOC placement — see `docs/segoc.md`.
+    pub fn chain_activators(&self) -> Vec<usize> {
+        self.chain.iter().map(|l| l.activator).collect()
+    }
+
+    /// The player whose chain-response window is currently open.
+    pub fn chain_responder(&self) -> usize {
+        self.responder
+    }
+
+    /// The effects the current responder may chain onto the top link right now, as
+    /// `(card, effect slot)` — what a `MSG_SELECT_CHAIN` prompt offers (besides
+    /// "pass"). Empty if there's no chain.
+    pub fn chain_response_options(&self) -> Vec<(CardId, usize)> {
+        match self.chain.last() {
+            Some(top) => self.chainable_effects(self.responder, top),
+            None => Vec::new(),
         }
     }
 

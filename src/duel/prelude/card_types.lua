@@ -1,4 +1,7 @@
--- Card types (bitmask) — mirror EDOPro's TYPE_* (ocgcore/common.h).
+-- Card types (bitmask). The three CLASS bits (MONSTER/SPELL/TRAP) say what a card
+-- is; every other bit is a MONSTER subtype. Spell/Trap subtypes live in their own
+-- enums (`spell_types.lua` / `trap_types.lua`), so we DIVERGE from EDOPro here
+-- (which packs quick-play/continuous/counter/… into this same bitmask).
 TYPE_MONSTER    = 0x1
 TYPE_SPELL      = 0x2
 TYPE_TRAP       = 0x4
@@ -12,11 +15,6 @@ TYPE_GEMINI     = 0x800
 TYPE_TUNER      = 0x1000
 TYPE_SYNCHRO    = 0x2000
 TYPE_TOKEN      = 0x4000
-TYPE_QUICKPLAY  = 0x10000
-TYPE_CONTINUOUS = 0x20000
-TYPE_EQUIP      = 0x40000
-TYPE_FIELD      = 0x80000
-TYPE_COUNTER    = 0x100000
 TYPE_FLIP       = 0x200000
 TYPE_TOON       = 0x400000
 TYPE_XYZ        = 0x800000

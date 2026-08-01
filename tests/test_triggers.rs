@@ -16,8 +16,22 @@ use cardcrusher::processor::DuelStatus;
 use cardcrusher::reason::{REASON_BATTLE, REASON_EFFECT};
 use cardcrusher::zone::Zone;
 use cardcrusher::{
-    CMD_ACTIVATE, CMD_ATTACK, MSG_SELECT_ATTACK_TARGET, MSG_SELECT_BATTLECMD, PLAYER_0, PLAYER_1,
+    CMD_ACTIVATE, CMD_ATTACK, CMD_PASS, MSG_SELECT_ATTACK_TARGET, MSG_SELECT_BATTLECMD,
+    MSG_SELECT_CHAIN, PLAYER_0, PLAYER_1,
 };
+
+/// C4: a fired trigger now resolves via the chain (a response window opens first).
+/// Pass every chain window so the trigger resolves. Breaks on `End` (a direct
+/// `process_events` chain empties the stack) or when the prompt is no longer a
+/// chain window (a menu/phase resumed underneath).
+fn pass_chain(duel: &mut Duel) {
+    while duel.messages().last() == Some(&MSG_SELECT_CHAIN) {
+        duel.set_response(&[CMD_PASS]);
+        if duel.process() == DuelStatus::End {
+            break;
+        }
+    }
+}
 
 /// Put the Avenger under `player`'s control on the field, and return its id.
 fn place_avenger(duel: &mut Duel, player: usize) -> cardcrusher::ids::CardId {
@@ -44,6 +58,9 @@ fn if_trigger_fires_when_destroyed_by_battle() {
 
     duel.destroy(avenger, REASON_BATTLE);
     duel.process_events();
+    // C4: the trigger is on the chain — surface + pass its window so it resolves.
+    duel.process();
+    pass_chain(&mut duel);
 
     assert_eq!(duel.zone_of(avenger), Some(Zone::GY), "the Avenger is gone");
     assert_eq!(
@@ -132,7 +149,8 @@ fn battle_destruction_fires_trigger_end_to_end() {
     assert_eq!(*duel.messages().last().unwrap(), MSG_SELECT_ATTACK_TARGET);
 
     duel.set_response(&[0]);
-    duel.process(); // resolve the battle (and, once wired, its triggers)
+    duel.process(); // resolve the battle → Avenger dies → its trigger opens a window
+    pass_chain(&mut duel); // pass the window → the trigger wipes the attacker
 
     assert_eq!(
         duel.zone_of(avenger),
@@ -171,6 +189,8 @@ fn any_destroy_trigger_fires_regardless_of_reason() {
 
     duel.destroy(retaliator, REASON_EFFECT); // NOT battle
     duel.process_events();
+    duel.process(); // surface the trigger's response window
+    pass_chain(&mut duel);
 
     assert_eq!(
         duel.zone_of(foe),
@@ -197,6 +217,8 @@ fn a_generic_destroy_trigger_also_fires_on_battle() {
 
     duel.destroy(retaliator, REASON_BATTLE);
     duel.process_events();
+    duel.process(); // surface the trigger's response window
+    pass_chain(&mut duel);
 
     assert_eq!(
         duel.zone_of(foe),
@@ -231,7 +253,13 @@ fn an_effect_kill_fires_the_victims_trigger() {
     duel.set_response(&[CMD_ACTIVATE, 0]);
     duel.process(); // → target selection
     duel.set_response(&[0]); // pick Retaliator
-    duel.process(); // resolve: destroys Retaliator by effect; drain must fire its trigger
+    duel.process(); // → response window opens
+                    // Pass the response window(s) → resolve: destroys Retaliator by effect; the
+                    // central drain then fires its trigger.
+    while duel.messages().last() == Some(&MSG_SELECT_CHAIN) {
+        duel.set_response(&[CMD_PASS]);
+        duel.process();
+    }
 
     assert_eq!(
         duel.zone_of(retaliator),

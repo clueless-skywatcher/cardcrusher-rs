@@ -20,6 +20,10 @@ function Effect:targets() return effect_targets() end
 
 function Effect:destroy(cards) effect_destroy(cards) end
 
+-- Move card(s) to a zone (ZONE_HAND / ZONE_DECK / ZONE_GY / ZONE_BANISHMENT / …).
+-- A plain relocation — NOT a destruction (no "destroyed" trigger fires).
+function Effect:send(cards, zone) effect_send(cards, zone) end
+
 function Effect:pay_lp(n) effect_pay_lp(n) end
 
 -- Ask the host to choose `count` cards from `candidates`. This PAUSES the whole

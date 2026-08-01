@@ -6,29 +6,32 @@
 //! normal `process()` / `Awaiting` / `set_response` loop — the same protocol a
 //! real front-end would use — and renders the board by querying the `Duel`.
 //!
-//! Controls:
-//!   Tab          switch focus between the MENU and the BOARD
-//!   ↑ ↓          move the menu selection (menu focus)
-//!   ↑ ↓ ← →      move the inspection cursor over field slots (board focus)
-//!   Enter        choose the selected menu item / return to the menu
-//!   q            quit
+//! Controls — mouse or keyboard:
+//!   Click        pick a menu item, or a card on the board (attacker / target)
+//!   Hover        preview the card under the mouse in the details panel
+//!   Right-click  a GY pile → view all the cards in it
+//!   Scroll       move the menu highlight
+//!   Tab · arrows · Enter · q   keyboard focus / navigation / select / quit
 //!
-//! In board focus, a details panel shows on the right for the card under the
-//! cursor (and nothing when the slot is empty).
+//! The board shows each player's hand (yours face-up, the opponent's face-down),
+//! their Monster + Spell/Trap zones, and a GY pile per side (right-click to open).
 //!
 //! Rendering is **double-buffered**: each frame is composed into an off-screen
 //! cell grid ([`Screen`]), then only the rows that changed since the last frame
 //! are written to the terminal — no full-screen clear, so no flicker.
 //!
-//! Scope note: this exercises what's built (turns, the Main-Phase menu, summon,
-//! menu-driven effect activation with target selection, and the Battle Phase —
-//! declare an attack, damage calc, direct attacks). No chains — that's later.
+//! Scope note: exercises what's built — turns, summon, effect activation with
+//! target selection, the Battle Phase, and the full chain (response windows,
+//! spell speed, LIFO, triggers on the chain, SEGOC).
 
 use std::io::{self, Write};
 use std::thread::sleep;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEventKind,
+};
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -41,10 +44,10 @@ use cardcrusher::position::Position;
 use cardcrusher::processor::DuelStatus;
 use cardcrusher::zone::Zone;
 use cardcrusher::{
-    CMD_ACTIVATE, CMD_ATTACK, CMD_NEXT_PHASE, CMD_SUMMON, MSG_NEW_TURN, MSG_PHASE_BATTLE,
-    MSG_PHASE_DRAW, MSG_PHASE_END, MSG_PHASE_MAIN1, MSG_PHASE_MAIN2, MSG_PHASE_STANDBY,
-    MSG_SELECT_ATTACK_TARGET, MSG_SELECT_BATTLECMD, MSG_SELECT_CARD, MSG_SELECT_IDLECMD,
-    MSG_SELECT_YESNO, MSG_STARTUP,
+    CMD_ACTIVATE, CMD_ATTACK, CMD_NEXT_PHASE, CMD_PASS, CMD_RESPONSE, CMD_SUMMON, MSG_NEW_TURN,
+    MSG_PHASE_BATTLE, MSG_PHASE_DRAW, MSG_PHASE_END, MSG_PHASE_MAIN1, MSG_PHASE_MAIN2,
+    MSG_PHASE_STANDBY, MSG_SELECT_ATTACK_TARGET, MSG_SELECT_BATTLECMD, MSG_SELECT_CARD,
+    MSG_SELECT_CHAIN, MSG_SELECT_IDLECMD, MSG_SELECT_YESNO, MSG_STARTUP,
 };
 
 /// How long an automatic beat lingers on screen so a hotseat player can follow
@@ -71,6 +74,7 @@ fn main() {
                     Some(MSG_SELECT_BATTLECMD) => battle_phase_menu(&mut duel, &mut ui),
                     Some(MSG_SELECT_ATTACK_TARGET) => select_attack_target(&mut duel, &mut ui),
                     Some(MSG_SELECT_CARD) => select_target(&mut duel, &mut ui),
+                    Some(MSG_SELECT_CHAIN) => chain_response_menu(&mut duel, &mut ui),
                     _ => duel.set_response(&[0]), // shouldn't happen; keep moving
                 },
                 // The engine did internal work. If the board actually changed,
@@ -99,6 +103,7 @@ const FERAL_IMP: u32 = 41392891;
 const MYSTICAL_ELF: u32 = 15025844;
 const EXAMPLE_SPELL: u32 = 12345678;
 const OPTIONAL_AVENGER: u32 = 90000005;
+const QUICK_NUKE: u32 = 90000008; // a Quick-Play spell (Spell Speed 2)
 
 fn setup() -> Duel {
     let mut duel = Duel::new();
@@ -125,6 +130,10 @@ fn setup() -> Duel {
     // yes/no prompt. Yes wipes the opponent's board.
     let avenger = duel.make_card(OPTIONAL_AVENGER);
     duel.add_to_hand(0, avenger);
+    // P1 holds a Quick-Play (Spell Speed 2) so they can CHAIN in response to P0's
+    // activations — exercising the response window + LIFO resolution.
+    let quick = duel.make_card(QUICK_NUKE);
+    duel.add_to_hand(1, quick);
 
     let foe = duel.make_card(FERAL_IMP); // on the opponent's field
     let foe = duel.add_card(foe);
@@ -474,16 +483,20 @@ const BOARD_X: u16 = 5; // x of the first cell (row labels sit to the left)
 // on a normal ~24-row terminal.
 const TITLE_Y: u16 = 0;
 const OPP_HDR_Y: u16 = 1;
-const R0_Y: u16 = 2; // opponent S/T
+const OPP_HAND_Y: u16 = 2; // opponent hand (face-down)
+const R0_Y: u16 = OPP_HAND_Y + CELL_H; // opponent S/T
 const R1_Y: u16 = R0_Y + CELL_H; // opponent Monsters
 const DIV_Y: u16 = R1_Y + CELL_H; // centre divider
 const R2_Y: u16 = DIV_Y + 1; // your Monsters
 const R3_Y: u16 = R2_Y + CELL_H; // your S/T
-const YOU_HDR_Y: u16 = R3_Y + CELL_H;
+const YOUR_HAND_Y: u16 = R3_Y + CELL_H; // your hand (face-up)
+const YOU_HDR_Y: u16 = YOUR_HAND_Y + CELL_H;
 const MENU_Y: u16 = YOU_HDR_Y + 2;
 
-// The right-hand column (details / hand / graveyard panels).
-const BOARD_RIGHT: u16 = BOARD_X + 5 * CELL_TW + 4 * GAP; // x just past the board
+// The GY pile column (a 6th column, right of the 5 field cells), then the info
+// panel just past it.
+const PILE_X: u16 = BOARD_X + 5 * (CELL_TW + GAP); // = cell_x(5)
+const BOARD_RIGHT: u16 = PILE_X + CELL_TW; // x just past the board (incl. piles)
 const PANEL_X: u16 = BOARD_RIGHT + 2;
 
 /// Width of the right-hand panel for a terminal `screen_w` cols wide — it shrinks
@@ -498,14 +511,17 @@ fn has_side_panel(screen_w: usize) -> bool {
     screen_w as u16 >= PANEL_X + 10
 }
 
-/// The four navigable field rows, from `you`'s view (top → bottom).
-fn nav_rows(you: usize) -> [(usize, Zone, u16, &'static str); 4] {
+/// The six navigable rows, from `you`'s view (top → bottom): opponent hand, S/T,
+/// Monsters; then your Monsters, S/T, hand. (The opponent's hand is face-down.)
+fn nav_rows(you: usize) -> [(usize, Zone, u16, &'static str); 6] {
     let opp = 1 - you;
     [
+        (opp, Zone::Hand, OPP_HAND_Y, "Hand"),
         (opp, Zone::SpellTrapZone, R0_Y, "S/T"),
         (opp, Zone::MonsterZone, R1_Y, "Mon"),
         (you, Zone::MonsterZone, R2_Y, "Mon"),
         (you, Zone::SpellTrapZone, R3_Y, "S/T"),
+        (you, Zone::Hand, YOUR_HAND_Y, "Hand"),
     ]
 }
 
@@ -514,6 +530,9 @@ fn zone_cards(duel: &Duel, player: usize, zone: Zone) -> Vec<CardId> {
         Zone::MonsterZone => duel.monster_zone(player),
         Zone::SpellTrapZone => duel.spell_trap_zone(player),
         Zone::GY => duel.graveyard(player),
+        Zone::Hand => (0..duel.hand_count(player))
+            .filter_map(|i| duel.hand_card(player, i))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -522,9 +541,18 @@ fn cell_x(col: usize) -> u16 {
     BOARD_X + col as u16 * (CELL_TW + GAP)
 }
 
-/// The card the inspection cursor is currently over, if any.
+/// Whether a `(player, zone)` is hidden from `you` — only the opponent's hand.
+fn is_hidden(player: usize, zone: Zone, you: usize) -> bool {
+    zone == Zone::Hand && player != you
+}
+
+/// The card the inspection cursor is currently over, if any. The opponent's hand
+/// is face-down, so it never reveals a card.
 fn card_under_cursor(duel: &Duel, ui: &Ui, you: usize) -> Option<CardId> {
     let (player, zone, _, _) = nav_rows(you)[ui.row];
+    if is_hidden(player, zone, you) {
+        return None;
+    }
     zone_cards(duel, player, zone).get(ui.col).copied()
 }
 
@@ -612,10 +640,17 @@ fn draw_board(scr: &mut Screen, duel: &Duel, focus: Focus, cursor: (usize, usize
     for (ri, (player, zone, y, label)) in nav_rows(you).into_iter().enumerate() {
         // Row label in the controlling player's signature colour.
         scr.put(LABEL_X, y + 1, label, player_color(player));
+        let hidden = is_hidden(player, zone, you);
+        let count = zone_cards(duel, player, zone).len();
         let cards = zone_cards(duel, player, zone);
         for c in 0..5 {
             let hi = focus == Focus::Board && row == ri && col == c;
-            draw_cell(scr, cell_x(c), y, duel, cards.get(c).copied(), hi);
+            if hidden {
+                // Opponent's hand: face-down backs, one per card they hold.
+                draw_back(scr, cell_x(c), y, c < count, hi);
+            } else {
+                draw_cell(scr, cell_x(c), y, duel, cards.get(c).copied(), hi);
+            }
         }
         if y == R1_Y {
             scr.put(
@@ -626,7 +661,54 @@ fn draw_board(scr: &mut Screen, duel: &Duel, focus: Focus, cursor: (usize, usize
             );
         }
     }
+    // GY piles in the 6th column (right-click to view — see `pile_hit`).
+    draw_pile(scr, PILE_X, R0_Y, "GY", duel.graveyard(opp).len());
+    draw_pile(scr, PILE_X, R3_Y, "GY", duel.graveyard(you).len());
     draw_header(scr, YOU_HDR_Y, duel, you, "You");
+}
+
+/// A face-down card cell (opponent's hand). `present` = an actual card sits here.
+fn draw_back(scr: &mut Screen, x: u16, y: u16, present: bool, hi: bool) {
+    let color = if hi { Color::Yellow } else { Color::DarkGrey };
+    let bar = "─".repeat(CELL_W);
+    let body = if present {
+        "  ▚▚▚▚▚"
+    } else {
+        "    ·"
+    };
+    scr.put(x, y, &format!("┌{bar}┐"), color);
+    scr.put(x, y + 1, &format!("│{}│", fit(body, CELL_W)), color);
+    scr.put(x, y + 2, &format!("│{}│", fit(body, CELL_W)), color);
+    scr.put(x, y + 3, &format!("└{bar}┘"), color);
+}
+
+/// A pile box (GY): a labelled box showing its card count.
+fn draw_pile(scr: &mut Screen, x: u16, y: u16, label: &str, count: usize) {
+    let color = Color::Grey;
+    let bar = "─".repeat(CELL_W);
+    scr.put(x, y, &format!("┌{bar}┐"), color);
+    scr.put(x, y + 1, &format!("│{}│", fit(label, CELL_W)), color);
+    scr.put(
+        x,
+        y + 2,
+        &format!("│{}│", fit(&format!("{count} card"), CELL_W)),
+        color,
+    );
+    scr.put(x, y + 3, &format!("└{bar}┘"), color);
+}
+
+/// If a click at `(col, row)` lands on a GY pile box, return whose GY it is.
+fn pile_hit(you: usize, col: u16, row: u16) -> Option<usize> {
+    if !(PILE_X..PILE_X + CELL_TW).contains(&col) {
+        return None;
+    }
+    if (R0_Y..R0_Y + CELL_H).contains(&row) {
+        Some(1 - you) // opponent's GY (top)
+    } else if (R3_Y..R3_Y + CELL_H).contains(&row) {
+        Some(you) // your GY (bottom)
+    } else {
+        None
+    }
 }
 
 /// Draw the board + menu. Returns whether the frame changed since the last one.
@@ -688,18 +770,16 @@ fn render(duel: &Duel, ui: &mut Ui, title: &str, items: &[Item]) -> bool {
     scr.put(
         LABEL_X,
         first_row + (end - offset) as u16,
-        "Tab focus · ↑↓ move · Enter select · q quit",
+        "Click select · Hover to preview · scroll move · q quit",
         Color::DarkGrey,
     );
 
-    // Right column: the focused card's details (if any), then the hand below it.
-    // Skipped entirely on a terminal too narrow to hold it.
+    // Right column: the hovered/selected card's details (the hand is now a row on
+    // the field). Skipped entirely on a terminal too narrow to hold it.
     if has_side_panel(scr.w) {
-        let mut y = R0_Y;
         if let Some(id) = focused {
-            y = draw_card_panel(scr, id, duel, R0_Y) + 1;
+            draw_card_panel(scr, id, duel, R0_Y);
         }
-        draw_hand_panel(scr, duel, you, y);
     }
 
     scr.flush(&mut io::stdout())
@@ -782,29 +862,6 @@ fn draw_card_panel(scr: &mut Screen, id: CardId, duel: &Duel, top_y: u16) -> u16
     }
 
     draw_panel(scr, top_y, title, &lines, 0)
-}
-
-/// Draw the hand as a panel below the card panel: each card indexed, with stats.
-fn draw_hand_panel(scr: &mut Screen, duel: &Duel, you: usize, top_y: u16) {
-    let cards: Vec<CardId> = (0..duel.hand_count(you))
-        .filter_map(|i| duel.hand_card(you, i))
-        .collect();
-    let lines: Vec<PanelLine> = if cards.is_empty() {
-        vec![("(empty)".into(), Color::DarkGrey, false)]
-    } else {
-        cards
-            .iter()
-            .enumerate()
-            .map(|(i, &id)| {
-                (
-                    format!("[{i}] {}", hand_label(duel, id)),
-                    Color::White,
-                    false,
-                )
-            })
-            .collect()
-    };
-    draw_panel(scr, top_y, " Hand ", &lines, 0);
 }
 
 /// Draw a titled box at `(PANEL_X, top_y)` with the given lines. Returns the `y`
@@ -924,9 +981,38 @@ fn phase_label(m: u8) -> Option<&'static str> {
 
 // ===== Input loop ========================================================
 
+/// If a click at `(col, row)` lands on a visible menu item, return its index.
+/// The menu occupies the left region below the board (`col < PANEL_X`).
+fn menu_hit(ui: &Ui, item_count: usize, col: u16, row: u16) -> Option<usize> {
+    let first_row = MENU_Y + 1;
+    if col >= PANEL_X || row < first_row {
+        return None;
+    }
+    let shown = visible_rows(ui.screen.h, first_row).min(item_count.saturating_sub(ui.menu_scroll));
+    let r = (row - first_row) as usize;
+    (r < shown).then_some(ui.menu_scroll + r)
+}
+
+/// If a click lands on a board cell, return `(nav-row, column)` — the same
+/// coordinates as the inspection cursor.
+fn board_hit(you: usize, col: u16, row: u16) -> Option<(usize, usize)> {
+    for (ri, (_, _, y, _)) in nav_rows(you).into_iter().enumerate() {
+        if row >= y && row < y + CELL_H {
+            for c in 0..5u16 {
+                let x = cell_x(c as usize);
+                if col >= x && col < x + CELL_TW {
+                    return Some((ri, c as usize));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Render the board + menu and drive input until the player picks a real action.
-/// Returns the response bytes to hand to the engine. Tab toggles board/menu
-/// focus; board focus just inspects (with the details panel).
+/// Returns the response bytes to hand to the engine. Mouse: click a menu item to
+/// pick it, click a card to select/inspect it, scroll to move the highlight.
+/// Keyboard still works too — Tab toggles board/menu focus.
 fn run_menu(duel: &mut Duel, ui: &mut Ui, title: &str, items: &[Item]) -> Vec<u8> {
     if items.is_empty() {
         return vec![0];
@@ -934,14 +1020,14 @@ fn run_menu(duel: &mut Duel, ui: &mut Ui, title: &str, items: &[Item]) -> Vec<u8
     ui.sel = ui.sel.min(items.len() - 1);
     loop {
         render(duel, ui, title, items);
-        match read_key() {
-            KeyCode::Tab => {
+        match read_input() {
+            Input::Key(KeyCode::Tab) => {
                 ui.focus = match ui.focus {
                     Focus::Menu => Focus::Board,
                     Focus::Board => Focus::Menu,
                 }
             }
-            code => match ui.focus {
+            Input::Key(code) => match ui.focus {
                 Focus::Menu => match code {
                     KeyCode::Up => ui.sel = ui.sel.saturating_sub(1),
                     KeyCode::Down => ui.sel = (ui.sel + 1).min(items.len() - 1),
@@ -953,7 +1039,7 @@ fn run_menu(duel: &mut Duel, ui: &mut Ui, title: &str, items: &[Item]) -> Vec<u8
                 },
                 Focus::Board => match code {
                     KeyCode::Up => ui.row = ui.row.saturating_sub(1),
-                    KeyCode::Down => ui.row = (ui.row + 1).min(3),
+                    KeyCode::Down => ui.row = (ui.row + 1).min(5),
                     KeyCode::Left => ui.col = ui.col.saturating_sub(1),
                     KeyCode::Right => ui.col = (ui.col + 1).min(4),
                     // Enter on a slot: if a menu item is about that card (e.g. an
@@ -970,6 +1056,56 @@ fn run_menu(duel: &mut Duel, ui: &mut Ui, title: &str, items: &[Item]) -> Vec<u8
                     _ => {}
                 },
             },
+            // Scroll moves the menu highlight (like ↑/↓).
+            Input::Scroll(d) => {
+                ui.focus = Focus::Menu;
+                ui.sel = if d < 0 {
+                    ui.sel.saturating_sub(1)
+                } else {
+                    (ui.sel + 1).min(items.len() - 1)
+                };
+            }
+            Input::Click(col, row) => {
+                if let Some(i) = menu_hit(ui, items.len(), col, row) {
+                    // A single click on a menu item selects AND activates it.
+                    ui.sel = i;
+                    ui.focus = Focus::Menu;
+                    match &items[i].act {
+                        Act::Respond(bytes) => return bytes.clone(),
+                        Act::ViewGy(p) => view_gy(duel, ui, *p),
+                    }
+                } else if let Some((r, c)) = board_hit(current(duel), col, row) {
+                    ui.focus = Focus::Board;
+                    ui.row = r;
+                    ui.col = c;
+                    // Clicking a card that a menu item is about (attacker / target)
+                    // picks it straight from the board.
+                    if let Some(bytes) = card_under_cursor(duel, ui, current(duel))
+                        .and_then(|card| item_for_card(items, card))
+                    {
+                        return bytes;
+                    }
+                }
+            }
+            // Hover PREVIEWS: move the selection/cursor onto the card under the
+            // mouse so the details panel shows it — never select/act. Over empty
+            // space, leave the current preview as-is.
+            Input::Hover(col, row) => {
+                if let Some(i) = menu_hit(ui, items.len(), col, row) {
+                    ui.sel = i;
+                    ui.focus = Focus::Menu;
+                } else if let Some((r, c)) = board_hit(current(duel), col, row) {
+                    ui.focus = Focus::Board;
+                    ui.row = r;
+                    ui.col = c;
+                }
+            }
+            // Right-click a GY pile → open its full card list.
+            Input::RightClick(col, row) => {
+                if let Some(p) = pile_hit(current(duel), col, row) {
+                    view_gy(duel, ui, p);
+                }
+            }
         }
     }
 }
@@ -1005,6 +1141,23 @@ fn view_items(you: usize) -> Vec<Item> {
 fn yesno_menu(duel: &mut Duel, ui: &mut Ui) {
     let items = vec![respond("Yes", vec![1]), respond("No", vec![0])];
     let bytes = run_menu(duel, ui, "Activate the optional effect?", &items);
+    duel.set_response(&bytes);
+}
+
+/// A chain response window: the current responder may chain a fast effect onto the
+/// top link, or pass. `[CMD_PASS]` passes; `[CMD_RESPONSE, i]` chains option `i`.
+fn chain_response_menu(duel: &mut Duel, ui: &mut Ui) {
+    let responder = duel.chain_responder();
+    let mut items = vec![respond("Pass — no response", vec![CMD_PASS])];
+    for (opt, (card, _slot)) in duel.chain_response_options().into_iter().enumerate() {
+        items.push(respond_card(
+            format!("Chain: {}", name_of(duel, card)),
+            vec![CMD_RESPONSE, opt as u8],
+            card,
+        ));
+    }
+    let title = format!("Player {responder}: respond to the chain?");
+    let bytes = run_menu(duel, ui, &title, &items);
     duel.set_response(&bytes);
 }
 
@@ -1120,15 +1273,17 @@ fn view_gy(duel: &Duel, ui: &mut Ui, player: usize) {
             scr.put(
                 LABEL_X,
                 MENU_Y + 1,
-                "↑↓ browse · Esc/Enter return · q quit",
+                "↑↓/scroll browse · Esc/Enter/click return · q quit",
                 Color::DarkGrey,
             );
             scr.flush(&mut io::stdout());
         }
-        match read_key() {
-            KeyCode::Up => sel = sel.saturating_sub(1),
-            KeyCode::Down if !cards.is_empty() => sel = (sel + 1).min(cards.len() - 1),
-            KeyCode::Enter | KeyCode::Esc => return,
+        match read_input() {
+            Input::Key(KeyCode::Up) | Input::Scroll(-1) => sel = sel.saturating_sub(1),
+            Input::Key(KeyCode::Down) | Input::Scroll(_) if !cards.is_empty() => {
+                sel = (sel + 1).min(cards.len() - 1)
+            }
+            Input::Key(KeyCode::Enter) | Input::Key(KeyCode::Esc) | Input::Click(..) => return,
             _ => {}
         }
     }
@@ -1169,11 +1324,12 @@ fn game_over(duel: &Duel, ui: &mut Ui) {
     ui.screen.put_bold(
         LABEL_X,
         MENU_Y,
-        &format!("▸ {}  (press any key to exit)", result_text(duel)),
+        &format!("▸ {}  (press any key or click to exit)", result_text(duel)),
         Color::Yellow,
     );
     ui.screen.flush(&mut io::stdout());
-    read_key();
+    // Wait for a real action — ignore hover motion (it would dismiss instantly).
+    while let Input::Hover(..) = read_input() {}
 }
 
 fn announce_result(duel: &Duel) {
@@ -1198,7 +1354,7 @@ impl TerminalGuard {
     fn new() -> Self {
         enable_raw_mode().expect("enable raw mode");
         let mut out = io::stdout();
-        let _ = queue!(out, EnterAlternateScreen, cursor::Hide);
+        let _ = queue!(out, EnterAlternateScreen, EnableMouseCapture, cursor::Hide);
         let _ = out.flush();
         TerminalGuard
     }
@@ -1207,25 +1363,48 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let mut out = io::stdout();
-        let _ = queue!(out, cursor::Show, LeaveAlternateScreen);
+        let _ = queue!(out, cursor::Show, DisableMouseCapture, LeaveAlternateScreen);
         let _ = out.flush();
         let _ = disable_raw_mode();
     }
 }
 
-/// Block for the next key press. `q` and Ctrl-C quit the whole demo.
-fn read_key() -> KeyCode {
+/// One user action: a key, a click at a terminal cell, a hover, or a scroll tick.
+enum Input {
+    Key(KeyCode),
+    Click(u16, u16),      // left click at (column, row) — select/act
+    RightClick(u16, u16), // right click — open a zone (e.g. a GY pile)
+    Hover(u16, u16),      // mouse moved to (column, row) — preview the card there
+    Scroll(i8),           // -1 up, +1 down
+}
+
+/// Block for the next input event. `q` and Ctrl-C quit the whole demo. Mouse drag
+/// and the middle button are ignored.
+fn read_input() -> Input {
     loop {
-        if let Ok(Event::Key(k)) = event::read() {
-            if k.kind != KeyEventKind::Press && k.kind != KeyEventKind::Repeat {
-                continue;
+        match event::read() {
+            Ok(Event::Key(k)) => {
+                if k.kind != KeyEventKind::Press && k.kind != KeyEventKind::Repeat {
+                    continue;
+                }
+                if k.code == KeyCode::Char('q')
+                    || (k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL))
+                {
+                    quit();
+                }
+                return Input::Key(k.code);
             }
-            if k.code == KeyCode::Char('q')
-                || (k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL))
-            {
-                quit();
-            }
-            return k.code;
+            Ok(Event::Mouse(m)) => match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => return Input::Click(m.column, m.row),
+                MouseEventKind::Down(MouseButton::Right) => {
+                    return Input::RightClick(m.column, m.row)
+                }
+                MouseEventKind::Moved => return Input::Hover(m.column, m.row),
+                MouseEventKind::ScrollUp => return Input::Scroll(-1),
+                MouseEventKind::ScrollDown => return Input::Scroll(1),
+                _ => continue,
+            },
+            _ => continue,
         }
     }
 }
@@ -1233,7 +1412,7 @@ fn read_key() -> KeyCode {
 /// Restore the terminal and exit immediately (used for `q` / Ctrl-C).
 fn quit() -> ! {
     let mut out = io::stdout();
-    let _ = queue!(out, cursor::Show, LeaveAlternateScreen);
+    let _ = queue!(out, cursor::Show, DisableMouseCapture, LeaveAlternateScreen);
     let _ = out.flush();
     let _ = disable_raw_mode();
     std::process::exit(0);

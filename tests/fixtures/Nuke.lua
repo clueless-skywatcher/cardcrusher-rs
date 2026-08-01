@@ -3,7 +3,8 @@
 -- it without a target-selection freeze getting in the way. Fake code (9000000x).
 
 Nuke = Card:new(90000006, {
-    type = TYPE_SPELL | TYPE_NORMAL,
+    type = TYPE_SPELL,
+    spell_type = SPELL_NORMAL,
     name = "Nuke",
     text = "Destroy all monsters your opponent controls.",
 })

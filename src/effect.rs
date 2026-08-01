@@ -15,7 +15,7 @@ use std::rc::Rc;
 use mlua::Lua;
 use slotmap::{Key, KeyData};
 
-use crate::{field::Field, ids::CardId};
+use crate::{field::Field, ids::CardId, zone::Zone};
 
 /// Scratchpad shared between the `Duel` and the effect currently resolving.
 /// Verbs on `e` write here; the `Duel` reads it back.
@@ -25,6 +25,9 @@ pub struct EffectContext {
     pub targets: Vec<CardId>,
     /// Cards the script asked to destroy (applied by the `Duel` afterward).
     pub to_destroy: Vec<CardId>,
+    /// Cards the script asked to `send` somewhere — `(card, destination)`, applied
+    /// by the `Duel` afterward. A plain move, NOT a destruction.
+    pub to_move: Vec<(CardId, Zone)>,
     /// Costs the script declared in its `cost` stage. The `Duel` checks they're
     /// all payable, then applies them ("describe, then execute").
     pub costs: Vec<CostType>,
@@ -67,6 +70,50 @@ impl EffectKind {
     }
 }
 
+// Card-type bits + subtype values needed to derive spell speed — mirror the
+// prelude constants (`card_types.lua` / `spell_types.lua` / `trap_types.lua`).
+const TYPE_SPELL: u32 = 0x2;
+const TYPE_TRAP: u32 = 0x4;
+const SPELL_QUICKPLAY: u32 = 2;
+const TRAP_COUNTER: u32 = 3;
+
+/// An effect's **spell speed** (0..3) — a pure function of its `kind` plus the
+/// owning card's type + subtype. Mirrors EDOPro `effect::get_speed()`
+/// (`effect.cpp:694`):
+/// - `Quick` → 2; `Ignition` / `Trigger` → 1;
+/// - a Spell/Trap **activation** by subtype: quick-play spell → 2, counter trap →
+///   3, otherwise a normal spell → 1 / a normal (or continuous) trap → 2;
+/// - anything else (a monster activation) → 0 (non-chainable).
+///
+/// It gates responses: speed 1 can only *start* a chain, and a response must be
+/// `>=` the current top link's speed (see `docs/chain.md`).
+pub fn spell_speed(
+    kind: EffectKind,
+    card_type: u32,
+    spell_type: Option<u32>,
+    trap_type: Option<u32>,
+) -> u8 {
+    match kind {
+        EffectKind::Quick => 2,
+        EffectKind::Ignition | EffectKind::Trigger => 1,
+        EffectKind::Activate if card_type & TYPE_TRAP != 0 => {
+            if trap_type == Some(TRAP_COUNTER) {
+                3
+            } else {
+                2
+            }
+        }
+        EffectKind::Activate if card_type & TYPE_SPELL != 0 => {
+            if spell_type == Some(SPELL_QUICKPLAY) {
+                2
+            } else {
+                1
+            }
+        }
+        EffectKind::Activate => 0,
+    }
+}
+
 /// Register the effect verbs as VM globals the prelude's `Effect` methods call.
 /// Each captures the shared context, so a stage's verbs read/write what the
 /// `Duel` sees. One VM per `Duel`, so each hook is bound to that duel's context.
@@ -85,6 +132,18 @@ pub fn register_verbs(
         c.borrow_mut()
             .to_destroy
             .extend(ids.into_iter().map(decode));
+        Ok(())
+    })?;
+
+    // e:send(list, zone) -> record those cards to be moved to `zone` (a ZONE_*
+    // code). A plain relocation, not a destruction — unknown codes are ignored.
+    let c = ctx.clone();
+    let send = lua.create_function(move |_, (ids, zone): (Vec<i64>, u32)| {
+        if let Some(zone) = Zone::from_code(zone) {
+            let mut ctx = c.borrow_mut();
+            ctx.to_move
+                .extend(ids.into_iter().map(|id| (decode(id), zone)));
+        }
         Ok(())
     })?;
 
@@ -112,6 +171,7 @@ pub fn register_verbs(
     })?;
 
     lua.globals().set("effect_destroy", destroy)?;
+    lua.globals().set("effect_send", send)?;
     lua.globals().set("effect_targets", targets)?;
     lua.globals().set("effect_pay_lp", pay_lp)?;
     lua.globals()

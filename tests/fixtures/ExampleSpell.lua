@@ -6,7 +6,8 @@
 
 -- A Normal Spell. Its printed record (type + text) is harvested by the engine.
 ExampleSpell = Card:new(12345678, {
-    type = TYPE_SPELL | TYPE_NORMAL,
+    type = TYPE_SPELL,
+    spell_type = SPELL_NORMAL,
     name = "Example Spell",
     text = "Pay 500 LP, then destroy 1 monster your opponent controls.",
 })
