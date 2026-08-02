@@ -23,6 +23,7 @@
 //! exactly where it left off. A paused note on a stack can do that; a half-finished
 //! normal function call cannot.
 
+use crate::event::EventSnapshot;
 use crate::ids::CardId;
 
 pub type Step = u16;
@@ -67,6 +68,9 @@ pub enum Processor {
         effect: usize,
         card: CardId,
         player: usize,
+        /// The event that fired this trigger, so its details are readable when the
+        /// effect resolves (via `e:get_event_detail`).
+        event: EventSnapshot,
     },
     ResolveChain {
         step: usize,

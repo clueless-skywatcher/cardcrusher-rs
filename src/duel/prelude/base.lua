@@ -54,6 +54,11 @@ function Effect:battle_damage() return effect_battle_damage() end
 -- theirs. (Kuriboh checks `current_player() == OPPONENT` — "the opponent attacked".)
 function Effect:current_player() return effect_current_player() end
 
+-- A detail of the event that fired this trigger, by (event code, key) — e.g.
+-- get_event_detail(EVENT_DESTROYED, "destroyed_card"). The code guards it: nil
+-- unless the current event matches. Each event type defines its own detail keys.
+function Effect:get_event_detail(code, key) return effect_get_event_detail(code, key) end
+
 -- Grant a PLAYER modifier: a MOD_* code (+ optional value), on `who` relative to
 -- the activator. Returns the new modifier's id (for remove_modifier later).
 function Effect:add_player_modifier(who, code, value) return effect_add_player_modifier(who, code, value) end

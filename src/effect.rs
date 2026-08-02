@@ -15,7 +15,13 @@ use std::rc::Rc;
 use mlua::Lua;
 use slotmap::{Key, KeyData};
 
-use crate::{field::Field, ids::CardId, modifiers::ModifierType, zone::Zone};
+use crate::{
+    event::{EventDetail, EventSnapshot},
+    field::Field,
+    ids::CardId,
+    modifiers::ModifierType,
+    zone::Zone,
+};
 
 /// Scratchpad shared between the `Duel` and the effect currently resolving.
 /// Verbs on `e` write here; the `Duel` reads it back.
@@ -55,6 +61,10 @@ pub struct EffectContext {
     pub mods_to_remove: Vec<u32>,
     /// Event subscriptions a verb queued, drained onto the `Duel` afterward.
     pub subscriptions_to_add: Vec<Subscription>,
+    /// The event that fired the currently-resolving trigger (restored from its
+    /// chain link), so `e:get_event_detail` can read its details. `Default`
+    /// (code 0) outside a triggered effect.
+    pub event: EventSnapshot,
 }
 
 /// A queued reaction: run `func` when `event` fires, up to `remaining` more times.
@@ -244,6 +254,27 @@ pub fn register_verbs(
         Ok((ctx.turn_player + ctx.activator) % 2)
     })?;
 
+    // e:get_event_detail(code, key) -> the detail `key` of the event that fired this
+    // trigger, but only if that event's code == `code` (the code is a guard). A
+    // card comes back as its encoded id, a card list as a table of ids. nil if the
+    // event doesn't match or has no such detail.
+    let c = ctx.clone();
+    let get_event_detail = lua.create_function(move |lua, (code, key): (u32, String)| {
+        let ctx = c.borrow();
+        if ctx.event.code != code {
+            return Ok(mlua::Value::Nil);
+        }
+        Ok(match ctx.event.details.get(&key) {
+            Some(EventDetail::Card(id)) => mlua::Value::Integer(encode(*id)),
+            Some(EventDetail::Cards(ids)) => {
+                mlua::Value::Table(lua.create_sequence_from(encode_ids(ids))?)
+            }
+            Some(EventDetail::Int(n)) => mlua::Value::Integer(*n as i64),
+            Some(EventDetail::Bool(b)) => mlua::Value::Boolean(*b),
+            None => mlua::Value::Nil,
+        })
+    })?;
+
     // e:add_player_modifier(who, code, value?) -> grant a player modifier and
     // return its new id. `who` is YOU/OPPONENT relative to the activator; the
     // modifier is sourced to this effect's card. The add is applied by the Duel
@@ -298,6 +329,8 @@ pub fn register_verbs(
     lua.globals().set("effect_discard_self", discard_self)?;
     lua.globals().set("effect_battle_damage", battle_damage)?;
     lua.globals().set("effect_current_player", current_player)?;
+    lua.globals()
+        .set("effect_get_event_detail", get_event_detail)?;
     lua.globals()
         .set("effect_add_player_modifier", add_player_modifier)?;
     lua.globals()

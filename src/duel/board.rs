@@ -1,9 +1,11 @@
 //! The board & game state: the card arena, deck/hand piles, zones, movement,
 //! life points, and win conditions.
 
+use std::collections::BTreeMap;
+
 use crate::card::{Card, CardData};
 use crate::constants::{PLAYER_0, PLAYER_1};
-use crate::event::{DuelEvent, EVENT_BATTLE_DESTROYED, EVENT_DESTROYED};
+use crate::event::{DuelEvent, EventDetail, EVENT_BATTLE_DESTROYED, EVENT_DESTROYED};
 use crate::ids::CardId;
 use crate::modifiers::ModifierType::{AtkChange, DefChange, SetAtk, SetDef};
 use crate::modifiers::{Modifier, ModifierType};
@@ -198,16 +200,22 @@ impl Duel {
             c.reason = REASON_DESTROY | reason;
         }
         self.send_to(card, Zone::GY);
+        let by_battle = reason & REASON_BATTLE != 0;
         self.events.push_back(DuelEvent {
             code: EVENT_DESTROYED,
             card,
             reason: REASON_DESTROY | reason,
+            details: BTreeMap::from([
+                ("destroyed_card".to_string(), EventDetail::Card(card)),
+                ("by_battle".to_string(), EventDetail::Bool(by_battle)),
+            ]),
         });
-        if reason & REASON_BATTLE != 0 {
+        if by_battle {
             self.events.push_back(DuelEvent {
                 code: EVENT_BATTLE_DESTROYED,
                 card,
                 reason: REASON_DESTROY | reason,
+                details: BTreeMap::from([("destroyed_card".to_string(), EventDetail::Card(card))]),
             });
         }
     }

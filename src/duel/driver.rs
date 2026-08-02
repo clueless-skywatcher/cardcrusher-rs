@@ -401,6 +401,7 @@ impl Duel {
                 effect,
                 card,
                 player,
+                event,
             } => match step {
                 0 => {
                     *step += 1;
@@ -409,10 +410,14 @@ impl Duel {
                 }
                 _ => {
                     if self.responses.first().copied() == Some(1) {
-                        self.effect_ctx.borrow_mut().activator = *player;
+                        {
+                            let mut ctx = self.effect_ctx.borrow_mut();
+                            ctx.activator = *player;
+                            ctx.self_card = Some(*card);
+                            ctx.event = event.clone(); // firing event's details
+                        }
                         let _ = self.resolve_effect(*effect);
                     }
-                    let _ = card;
                     true
                 }
             },

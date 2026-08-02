@@ -21,6 +21,7 @@ fn ss1_top_link(duel: &mut Duel) -> ChainLink {
         card,
         activator: PLAYER_0,
         targets: vec![],
+        event: Default::default(),
     }
 }
 

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::{ids::CardId, reason::Reason};
 
 pub const EVENT_DESTROYED: u32 = 1;
@@ -16,4 +18,24 @@ pub struct DuelEvent {
     pub code: u32,
     pub card: CardId,
     pub reason: Reason,
+    pub details: BTreeMap<String, EventDetail>,
+}
+
+/// A value carried in an event's detail bag, queried from Lua by
+/// `e:get_event_detail(code, key)`.
+#[derive(Clone, Debug)]
+pub enum EventDetail {
+    Card(CardId),
+    Cards(Vec<CardId>),
+    Int(i32),
+    Bool(bool),
+}
+
+/// The frozen `(code, details)` of the event that fired a trigger, carried on its
+/// chain link so the details are still readable when the effect resolves later.
+/// `Default` (code 0) means "no event" — e.g. a plain Spell/Trap activation.
+#[derive(Clone, Default, Debug)]
+pub struct EventSnapshot {
+    pub code: u32,
+    pub details: BTreeMap<String, EventDetail>,
 }

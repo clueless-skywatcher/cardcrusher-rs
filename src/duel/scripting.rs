@@ -8,6 +8,7 @@ use mlua::thread::ThreadStatus;
 
 use crate::chain::ChainLink;
 use crate::effect::{spell_speed, CostType, EffectKind, Subscription};
+use crate::event::EventSnapshot;
 use crate::ids::CardId;
 use crate::modifiers::{Modifier, ModifierType};
 use crate::processor::{DuelStatus, Processor};
@@ -208,7 +209,8 @@ impl Duel {
                     self.send_to(card, Zone::SpellTrapZone);
                 }
                 let targets = self.effect_ctx.borrow().targets.clone();
-                self.push_chain_link(idx, card, player, targets);
+                // A plain activation isn't fired by an event → no snapshot.
+                self.push_chain_link(idx, card, player, targets, EventSnapshot::default());
                 Ok(DuelStatus::End)
             }
         }
@@ -242,7 +244,7 @@ impl Duel {
         thread.resume::<mlua::Value>(chosen)?;
         let activator = self.effect_ctx.borrow().activator;
         let targets = self.effect_ctx.borrow().targets.clone();
-        self.push_chain_link(index, card, activator, targets);
+        self.push_chain_link(index, card, activator, targets, EventSnapshot::default());
         Ok(DuelStatus::End)
     }
 
@@ -256,12 +258,14 @@ impl Duel {
         card: CardId,
         activator: usize,
         targets: Vec<CardId>,
+        event: EventSnapshot,
     ) {
         self.chain.push(ChainLink {
             effect_seq,
             card,
             activator,
             targets,
+            event,
         });
         self.passes = [false, false];
     }
@@ -464,7 +468,8 @@ impl Duel {
     /// yes/no; SEGOC-ordering them is deferred.
     pub fn process_events(&mut self) {
         let turn_player = self.turn_hist.last().copied().unwrap_or(0);
-        let mut fired: Vec<(usize, CardId, usize)> = Vec::new(); // (effect, card, controller)
+        // (effect, card, controller, the event that fired it).
+        let mut fired: Vec<(usize, CardId, usize, EventSnapshot)> = Vec::new();
 
         while let Some(event) = self.events.pop_front() {
             let Some(card) = self.get_card(event.card) else {
@@ -485,6 +490,11 @@ impl Duel {
                 .map(|(i, _)| i)
                 .collect();
 
+            // Freeze the event's details so the resolving trigger can query them.
+            let snapshot = EventSnapshot {
+                code: event.code,
+                details: event.details,
+            };
             for idx in indexes {
                 self.effect_ctx.borrow_mut().activator = player;
                 let t = self.effects.borrow()[idx].1.clone();
@@ -497,9 +507,10 @@ impl Duel {
                         effect: idx,
                         card: event.card,
                         player,
+                        event: snapshot.clone(),
                     });
                 } else {
-                    fired.push((idx, event.card, player));
+                    fired.push((idx, event.card, player, snapshot.clone()));
                 }
             }
         }
@@ -507,15 +518,16 @@ impl Duel {
         // SEGOC: the turn player's triggers are placed first. A STABLE sort keeps
         // each player's triggers in event order (our stand-in for "the player
         // chooses their own order"). No targets yet — targeting triggers deferred.
-        fired.sort_by_key(|&(_, _, player)| player != turn_player);
-        for &(idx, card, player) in &fired {
-            self.push_chain_link(idx, card, player, Vec::new());
+        fired.sort_by_key(|(_, _, player, _)| *player != turn_player);
+        let any_fired = !fired.is_empty();
+        for (idx, card, player, snapshot) in fired {
+            self.push_chain_link(idx, card, player, Vec::new(), snapshot);
         }
 
         // Any links built → resolve them through the chain: open the response
         // window (opponent of the turn player responds first), then ResolveChain
         // unwinds LIFO — the same machinery as an activation.
-        if !fired.is_empty() {
+        if any_fired {
             self.processor_stack
                 .push(Processor::ResolveChain { step: 0 });
             self.processor_stack.push(Processor::ChainResponse {
@@ -596,6 +608,7 @@ impl Duel {
                 ctx.activator = link.activator;
                 ctx.targets = link.targets;
                 ctx.self_card = Some(link.card);
+                ctx.event = link.event; // restore the firing event's details
             }
 
             let _ = self.resolve_effect(link.effect_seq);
