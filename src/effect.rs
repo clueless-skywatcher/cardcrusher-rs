@@ -34,6 +34,9 @@ pub struct EffectContext {
     /// Cards the script asked to `send` somewhere — `(card, destination)`, applied
     /// by the `Duel` afterward. A plain move, NOT a destruction.
     pub to_move: Vec<(CardId, Zone)>,
+    /// Draws the script asked for — `(player, count)`, applied by the `Duel`
+    /// afterward. The player is already absolute (the verb resolves YOU/OPPONENT).
+    pub to_draw: Vec<(usize, usize)>,
     /// Costs the script declared in its `cost` stage. The `Duel` checks they're
     /// all payable, then applies them ("describe, then execute").
     pub costs: Vec<CostType>,
@@ -67,12 +70,25 @@ pub struct EffectContext {
     pub event: EventSnapshot,
 }
 
-/// A queued reaction: run `func` when `event` fires, up to `remaining` more times.
-/// (The `{count, period}` frequency's *period* isn't modeled yet — only the count.)
+/// A standing reaction: run `func` whenever `event` fires. Two flavours, from the
+/// two verbs that create one:
+/// - `e:queue(event, {count, ..}, fn)` → `remaining: Some(count)`, `until: None` —
+///   fires a fixed number of times, then drops. Kuriboh's "undo this once".
+/// - `e:apply_event_until(on, until, fn)` → `remaining: None` (unlimited),
+///   `until: Some(code)` — repeats until that event arrives. Maxx "C"'s "this turn".
+///
+/// `owner`/`self_card` are captured **at registration**, and restored before every
+/// call. Without them a closure's `YOU` would resolve against whatever effect
+/// happened to resolve last.
 #[derive(Debug)]
 pub struct Subscription {
     pub event: u32,
-    pub remaining: u32,
+    /// Firings left; `None` = unlimited (bounded by `until` instead).
+    pub remaining: Option<u32>,
+    /// The event that removes this subscription; `None` = never expires by event.
+    pub until: Option<u32>,
+    pub owner: usize,
+    pub self_card: Option<CardId>,
     pub func: mlua::Function,
 }
 
@@ -265,12 +281,7 @@ pub fn register_verbs(
             return Ok(mlua::Value::Nil);
         }
         Ok(match ctx.event.details.get(&key) {
-            Some(EventDetail::Card(id)) => mlua::Value::Integer(encode(*id)),
-            Some(EventDetail::Cards(ids)) => {
-                mlua::Value::Table(lua.create_sequence_from(encode_ids(ids))?)
-            }
-            Some(EventDetail::Int(n)) => mlua::Value::Integer(*n as i64),
-            Some(EventDetail::Bool(b)) => mlua::Value::Boolean(*b),
+            Some(detail) => detail_to_lua(lua, detail)?,
             None => mlua::Value::Nil,
         })
     })?;
@@ -309,14 +320,55 @@ pub fn register_verbs(
     let queue = lua.create_function(
         move |_, (event, freq, func): (u32, mlua::Table, mlua::Function)| {
             let count = freq.get::<u32>(1).unwrap_or(1);
-            c.borrow_mut().subscriptions_to_add.push(Subscription {
+            let mut ctx = c.borrow_mut();
+            let (owner, self_card) = (ctx.activator, ctx.self_card);
+            ctx.subscriptions_to_add.push(Subscription {
                 event,
-                remaining: count,
+                remaining: Some(count),
+                until: None,
+                owner,
+                self_card,
                 func,
             });
             Ok(())
         },
     )?;
+
+    // e:apply_event_until(on_event, until_event, fn) -> run `fn` EVERY time
+    // `on_event` fires, until `until_event` arrives. A standing rule with an expiry
+    // date, not a countdown — that's what "this turn, each time ..." needs.
+    let c = ctx.clone();
+    let apply_event_until = lua.create_function(
+        move |_, (on_event, until_event, func): (u32, u32, mlua::Function)| {
+            let mut ctx = c.borrow_mut();
+            // Snapshot WHO is setting this up, right now. The rule may not fire for
+            // ages, and by then the shared scratchpad will have moved on to some
+            // other effect — so we can't look it up later. Grab it while it's true.
+            let (owner, self_card) = (ctx.activator, ctx.self_card);
+            ctx.subscriptions_to_add.push(Subscription {
+                event: on_event,
+                remaining: None,          // no limit — the expiry is what stops it
+                until: Some(until_event), // ...and this is the expiry
+                owner,
+                self_card,
+                func,
+            });
+            Ok(())
+        },
+    )?;
+
+    // e:draw(who, n) -> "draw n cards for who". Records the intent; the Duel does it
+    // once the stage finishes, same as every other verb.
+    let c = ctx.clone();
+    let draw = lua.create_function(move |_, (who, n): (usize, usize)| {
+        let mut ctx = c.borrow_mut();
+        // Cards say YOU (0) or OPPONENT (1) — relative to whoever owns the effect.
+        // Turn that into a real player number here, while we still know who that is.
+        // YOU + activator 1 -> player 1. OPPONENT + activator 1 -> player 0.
+        let player = (who + ctx.activator) % 2;
+        ctx.to_draw.push((player, n));
+        Ok(())
+    })?;
 
     lua.globals().set("effect_destroy", destroy)?;
     lua.globals().set("effect_send", send)?;
@@ -336,8 +388,22 @@ pub fn register_verbs(
     lua.globals()
         .set("effect_remove_modifier", remove_modifier)?;
     lua.globals().set("effect_queue", queue)?;
+    lua.globals()
+        .set("effect_apply_event_until", apply_event_until)?;
+    lua.globals().set("effect_draw", draw)?;
 
     Ok(())
+}
+
+/// One event detail as the value Lua sees. Shared by `e:get_event_detail` (one key
+/// at a time) and the whole-event table handed to a subscription's closure.
+pub(crate) fn detail_to_lua(lua: &Lua, detail: &EventDetail) -> mlua::Result<mlua::Value> {
+    Ok(match detail {
+        EventDetail::Card(id) => mlua::Value::Integer(encode(*id)),
+        EventDetail::Cards(ids) => mlua::Value::Table(lua.create_sequence_from(encode_ids(ids))?),
+        EventDetail::Int(n) => mlua::Value::Integer(*n as i64),
+        EventDetail::Bool(b) => mlua::Value::Boolean(*b),
+    })
 }
 
 // A `CardId` is an arena ticket Lua can't hold, so we pass it across the boundary

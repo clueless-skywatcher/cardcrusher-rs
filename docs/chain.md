@@ -22,10 +22,10 @@ chain (new):    activate A → [respond?] → ... → resolve LIFO
 | Milestone | Concept | State |
 |---|---|---|
 | **C0** | activation builds a chain; a separate step resolves it (LIFO) | ✅ done |
-| **C1** | opponent response window (pass → resolve) | next |
-| **C2** | chain a 2nd effect, gated by **spell speed** → resolve LIFO (merged w/ old C3) | in design |
-| **C4** | triggers build a chain instead of resolving inline | deferred |
-| **C5** | SEGOC — ordering many simultaneous triggers | deferred |
+| **C1** | opponent response window (pass → resolve) | ✅ done |
+| **C2** | chain a 2nd effect, gated by **spell speed** → resolve LIFO (merged w/ old C3) | ✅ done |
+| **C4** | triggers build a chain instead of resolving inline | ✅ done (mandatory) |
+| **C5** | SEGOC — ordering many simultaneous triggers ([`segoc.md`](segoc.md)) | ✅ done (mandatory) |
 
 ---
 
@@ -207,20 +207,62 @@ GY, or banishment.
   `ACTIVATE · SPELL_QUICKPLAY` row of the truth table, the more interesting one.
 - Optionally a **speed-3 counter trap** later, to show it out-speeds a quick.
 
+## Open vs response — two gatherers (rung 4)
+
+**Design (confirmed vs EDOPro):** there is **no game-state enum**. "Open game state"
+vs "responding" is just *whether a chain exists* (`chain_length() > 0`), and it's
+enforced by **which processor is running** — `IdleCommand` (open) vs `ChainResponse`
+(response) — mirroring EDOPro's `IdleCommand` vs `QuickEffect`.
+
+EDOPro uses **two distinct predicates**, chosen at the call site:
+- `is_activateable` (`effect.cpp:145`) — open-state eligibility; **no speed check**.
+  Called alone by the idle path (`processor.cpp:1505+`).
+- `is_chainable` (`effect.cpp:511`) — adds the **spell-speed gate**: rejects SS1
+  always (`:516`); requires `speed ≥ top link` when a chain exists (`:523`, guarded
+  by `current_chain.size()`). The response path calls **both** (`processor.cpp:1011`).
+
+So our two gatherers stay separate:
+
+| gatherer | ≈ EDOPro | gate |
+|---|---|---|
+| `activatable_effects` (have it) | idle / `is_activateable` | condition + legal target |
+| **`chainable_effects`** (rung 4) | response / `is_activateable` **+ `is_chainable`** | the above **+ speed(E) ≥ 2 and ≥ speed_of(top link)** |
+
+- **The speed gate self-filters SS1:** normal spells + `IGNITION` (both speed 1) fail
+  `≥ 2` automatically — no need to pre-filter by `spell_type`. Quick-play (2) passes.
+- **`speed_of(link)` helper:** feed rung-2 `spell_speed` the link's effect kind +
+  its card's `(card_type, spell_type, trap_type)`. `chainable_effects` reads
+  `self.chain.last()` for the top link internally.
+- **Pool scope now:** hand `ACTIVATE` only (quick-play passes the gate). Field `QUICK`
+  monster effects arrive with the next rung.
+
 ### C2 build order (dependency-first)
 
 1. **Plumbing** ✅ — `spell_type`/`trap_type` on `CardData` + harvested; `level` now
    `Option`; `spell_types.lua` + `trap_types.lua` included in `load_prelude`.
-2. **Spell speed** — a pure `(kind, class, subtype) → 0..3` derive; unit-test it in
-   isolation against the truth table.
-3. **`send` verb** — `zones.lua`, a `to_move` scratchpad list drained like
-   `to_destroy`, wired to `send_to`.
-4. **Chainability gate** — "speed ≥ top link, and SS1 never responds"; this is what
-   `ChainResponse` uses to build the responder's chainable list.
-5. **`ChainResponse` processor** — C1 first (offer opponent → pass → resolve), then
-   C2 (ping-pong, two-flag pair on the `Duel`).
-6. **Fixtures + red tests** — Emergency-Bounce (quick-play, `send` to hand); the
-   ping-pong LIFO test.
+2. **Spell speed** ✅ — pure `spell_speed(kind, card_type, spell_type, trap_type)
+   → 0..3` in `effect.rs`; every truth-table row pinned in `tests/test_spell_speed.rs`.
+3. **`send` verb** ✅ — `e:send(cards, zone)` → `to_move` scratchpad, drained by
+   `handle_moves` → `send_to`. Added `zones.lua` (`ZONE_*`) + `Zone::from_code`.
+   Also made `send_to` **symmetric** (now adds to the Hand/Deck pile on entry, not
+   just the location map). Fixture `Bounce.lua` + `tests/test_send.rs`.
+4. **Chainability gate** ✅ — `chainable_effects(player, &top_link)` = the
+   activatability checks + `speed(E) ≥ 2 and ≥ speed_of(top)`. `speed_of(&link)`
+   helper. Pinned in `tests/test_chainable.rs` (fixture `QuickNuke.lua`, SS2).
+5. **`ChainResponse` processor** ✅ — C1 (offer opponent → pass → resolve) + C2
+   (ping-pong, two-flag `passes: [bool; 2]` on the `Duel`). **Step machine:**
+   - state: `chain_passes: [bool; 2]` on `Duel`, reset `[F,F]` on **every** link add
+     (a `push_chain_link` helper keeps this honest).
+   - `step 0`: emit `MSG_SELECT_CHAIN`; `step += 1`; freeze.
+   - `step 1` **pass** (`[0]`): `passes[player]=true`; if `passes[other]` → `return
+     true` (fall to `ResolveChain`); else push `ChainResponse{0, other}`.
+   - `step 1` **respond** (`[1,i]`): `activate(chainable_effects(player, top)[i])` →
+     link 2; reset `passes=[F,F]`; push `ChainResponse{0, other}`.
+   - Push order already gives `[Idle, ResolveChain, ChainResponse]`; `ResolveChain`
+     sits below the windows and unwinds LIFO once both pass. Targeting *responses*
+     (activate returns `Awaiting`) deferred.
+6. **Fixtures + tests** ✅ — `QuickNuke`/`QuickRetreat` (quick-play, `send` to hand);
+   `tests/test_chain_response.rs` pins C1 (pass → resolve) and C2 (ping-pong → LIFO).
 
 Each rung is independently testable, so red-first works at every step.
 

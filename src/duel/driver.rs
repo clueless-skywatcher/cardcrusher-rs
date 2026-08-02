@@ -2,7 +2,7 @@
 //! heartbeat: run the top task one step at a time, pausing to ask humans.
 
 use crate::constants::*;
-use crate::event::{EVENT_BATTLE_ENDED, EVENT_POST_DAMAGE_CALCULATION};
+use crate::event::{EVENT_BATTLE_ENDED, EVENT_POST_DAMAGE_CALCULATION, EVENT_TURN_ENDED};
 use crate::ids::CardId;
 use crate::processor::{DuelStatus, Processor};
 
@@ -158,6 +158,10 @@ impl Duel {
 
                 *step += 1;
                 if i + 1 == PHASES.len() {
+                    // The End Phase is done, so the turn is over. Announce it BEFORE
+                    // handing over, while this player is still the turn player —
+                    // that's what "this turn" rules are waiting on to expire.
+                    self.raise_event(EVENT_TURN_ENDED);
                     // Hand over to the other player.
                     if self.turn_hist.len() < self.max_turns {
                         let next = if *player == PLAYER_0 {
@@ -391,7 +395,11 @@ impl Duel {
                         self.resolve_chain();
                     }
                     self.window_timing = None;
-                    self.fire_subscriptions(EVENT_BATTLE_ENDED);
+                    // Raise it as a real event rather than poking subscriptions by
+                    // hand. It goes on the queue, `process_events` drains it at the
+                    // end of this step, and everything listening gets it the same
+                    // way it would for a destroy — one road, not two.
+                    self.raise_event(EVENT_BATTLE_ENDED);
                     self.reopen_battle_menu(*player);
                     true
                 }

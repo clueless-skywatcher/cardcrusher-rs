@@ -13,12 +13,35 @@ pub const EVENT_BATTLE_ENDED: u32 = 4;
 /// via `PointEvent` (processor.cpp, `BattleCommand` steps around 26/32).
 pub const EVENT_PRE_DAMAGE_CALCULATION: u32 = 5;
 pub const EVENT_POST_DAMAGE_CALCULATION: u32 = 6;
+pub const EVENT_SPECIAL_SUMMON: u32 = 7;
+/// The End Phase has begun — for things that happen *during* it.
+pub const EVENT_END_PHASE_STARTED: u32 = 8;
+/// The End Phase is fully done. Where "this turn" rules expire (see
+/// `Subscription::until`). Everything listening to an event fires before anything
+/// expiring on it is removed — EDOPro does the same, `PointEvent` (processor.cpp:557)
+/// before `reset_phase` (`:563`).
+pub const EVENT_TURN_ENDED: u32 = 9;
 
 pub struct DuelEvent {
     pub code: u32,
-    pub card: CardId,
+    /// The card the event is "about" — `None` for a *global* event that isn't tied
+    /// to one (a battle ending, a turn ending). Triggers only match when it's
+    /// `Some`; subscriptions fire either way.
+    pub card: Option<CardId>,
     pub reason: Reason,
     pub details: BTreeMap<String, EventDetail>,
+}
+
+impl DuelEvent {
+    /// An event with no card and no details — "a battle ended", "the turn ended".
+    pub fn global(code: u32) -> Self {
+        DuelEvent {
+            code,
+            card: None,
+            reason: 0,
+            details: BTreeMap::new(),
+        }
+    }
 }
 
 /// A value carried in an event's detail bag, queried from Lua by

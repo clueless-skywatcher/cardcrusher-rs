@@ -203,7 +203,7 @@ impl Duel {
         let by_battle = reason & REASON_BATTLE != 0;
         self.events.push_back(DuelEvent {
             code: EVENT_DESTROYED,
-            card,
+            card: Some(card),
             reason: REASON_DESTROY | reason,
             details: BTreeMap::from([
                 ("destroyed_card".to_string(), EventDetail::Card(card)),
@@ -213,7 +213,7 @@ impl Duel {
         if by_battle {
             self.events.push_back(DuelEvent {
                 code: EVENT_BATTLE_DESTROYED,
-                card,
+                card: Some(card),
                 reason: REASON_DESTROY | reason,
                 details: BTreeMap::from([("destroyed_card".to_string(), EventDetail::Card(card))]),
             });

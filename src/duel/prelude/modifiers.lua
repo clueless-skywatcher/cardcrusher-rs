@@ -12,3 +12,13 @@ ONCE = 0
 PER_TURN = 1
 THIS_TURN = 2
 PER_BATTLE = 3
+
+-- Activation limits for `effect.frequency` = { kind, count } -- kind FIRST here,
+-- unlike queue's { count, period }. `count` is how many activations are allowed,
+-- so "twice per turn" is { HARD_PER_TURN, 2 }.
+--   HARD_PER_TURN -- shared by every copy of the card (keyed on card name +
+--                    player), so a second copy in hand can't be used either.
+--   SOFT_PER_TURN -- per copy.
+-- Spent on activation (even if the effect is later negated); reset at turn start.
+HARD_PER_TURN = 0
+SOFT_PER_TURN = 1

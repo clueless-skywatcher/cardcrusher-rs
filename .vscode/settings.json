@@ -4,6 +4,7 @@
         "undefined-global"
     ],
     "Lua.diagnostics.globals": [
-        "YOU"
+        "YOU",
+        "battle_damage_prevent"
     ]
 }

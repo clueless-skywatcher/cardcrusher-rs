@@ -68,7 +68,20 @@ function Effect:remove_modifier(id) effect_remove_modifier(id) end
 
 -- Run `fn` when `event` fires, per the { count, period } frequency. Pass `fn` as a
 -- closure so it can capture locals (a bound method `e:method` isn't a valid value).
+-- `fn` receives the event that fired it.
 function Effect:queue(event, freq, fn) effect_queue(event, freq, fn) end
+
+-- Run `fn` EVERY time `on_event` fires, until `until_event` arrives — a standing
+-- rule with an expiry rather than a countdown ("this turn, each time ...").
+-- `fn` gets (ev, until_ev), exactly one of which is non-nil: `ev` on each repeat,
+-- `until_ev` on the single final call as the rule is removed (a teardown hook).
+-- The engine remembers who registered it, so YOU/OPPONENT stay correct throughout.
+function Effect:apply_event_until(on_event, until_event, fn)
+    effect_apply_event_until(on_event, until_event, fn)
+end
+
+-- Draw `n` cards for `who` (YOU/OPPONENT, relative to the activating player).
+function Effect:draw(who, n) effect_draw(who, n) end
 
 -- Base class for cards.
 Card         = {}

@@ -8,7 +8,7 @@ use mlua::thread::ThreadStatus;
 
 use crate::chain::ChainLink;
 use crate::effect::{spell_speed, CostType, EffectKind, Subscription};
-use crate::event::EventSnapshot;
+use crate::event::{DuelEvent, EventSnapshot};
 use crate::ids::CardId;
 use crate::modifiers::{Modifier, ModifierType};
 use crate::processor::{DuelStatus, Processor};
@@ -78,10 +78,18 @@ impl Duel {
         let resolve_func = effect_table.get::<mlua::Function>("resolve")?;
         resolve_func.call::<()>((effect_table.clone(), effect_table))?;
 
+        self.drain_effect_ops();
+        Ok(())
+    }
+
+    /// Apply **everything** a script just recorded into `ctx`. The single drain
+    /// point: used after a `resolve` stage and after every subscription closure, so
+    /// a queued closure's destroys/moves/draws can't leak into the next effect.
+    fn drain_effect_ops(&mut self) {
         self.handle_destroys();
         self.handle_moves();
+        self.handle_draws();
         self.apply_script_ops();
-        Ok(())
     }
 
     /// Apply the modifier/subscription intents a stage's verbs recorded into `ctx`
@@ -121,23 +129,142 @@ impl Duel {
         self.subscriptions.extend(subs);
     }
 
-    /// Raise `event`: run every subscription waiting on it (once each), applying
-    /// whatever their closures record, and keep those with firings left.
-    pub fn fire_subscriptions(&mut self, event: u32) {
+    /// Announce that something happened, with no card attached — "a battle ended",
+    /// "the turn ended". It joins the same queue as a destroy, so `process_events`
+    /// hands it to subscriptions on the next drain.
+    pub fn raise_event(&mut self, code: u32) {
+        self.events.push_back(DuelEvent::global(code));
+    }
+
+    /// Raise `event` at the subscriptions: **fire, then expire.**
+    ///
+    /// 1. Every subscription listening for this event runs once. Ones with a count
+    ///    tick down and drop at zero; unlimited ones stay.
+    /// 2. *Then* every subscription whose `until` is this event is removed — each
+    ///    getting one final call as a teardown hook.
+    ///
+    /// The two steps are ordered so a rule can still act on the very event that
+    /// kills it (an End-Phase effect sees a "this turn" rule that expires at turn
+    /// end), and so a rule *registered during* step 1 still dies in step 2. Mirrors
+    /// EDOPro running `PointEvent` (processor.cpp:557) before `reset_phase` (`:563`).
+    pub fn fire_subscriptions(&mut self, event: &EventSnapshot) {
+        // ============ STEP 1: FIRE ============
+
+        // Lift the whole list off the Duel. We're about to run Lua closures that can
+        // add MORE subscriptions, and they'd be writing to this same list while we
+        // walk it. Taking it out means we own a private copy and they can't trip us.
         let subs = std::mem::take(&mut self.subscriptions);
+
+        // Split into two piles: ones waiting on THIS event, and everyone else.
+        // `partition` gives back (matches, non-matches) in one pass.
         let (fired, mut keep): (Vec<Subscription>, Vec<Subscription>) =
-            subs.into_iter().partition(|s| s.event == event);
+            subs.into_iter().partition(|s| s.event == event.code);
+
         for mut sub in fired {
-            let _ = sub.func.call::<()>(());
-            self.apply_script_ops();
-            sub.remaining = sub.remaining.saturating_sub(1);
-            if sub.remaining > 0 {
+            // `false` = this is a normal firing, not the teardown call.
+            self.run_subscription(&sub, event, false);
+
+            // Did that use up its last firing? Two kinds of subscription:
+            let spent = match sub.remaining {
+                // Counted (from `queue`) — tick down. Kuriboh starts at 1, so one
+                // firing takes it to 0 and it's done.
+                Some(n) => {
+                    let left = n.saturating_sub(1);
+                    sub.remaining = Some(left);
+                    left == 0
+                }
+                // Unlimited (from `apply_event_until`) — Maxx "C" draws as many
+                // times as the opponent summons. Only its `until` event stops it.
+                None => false,
+            };
+
+            // Still has life in it → put it back in the keep pile.
+            if !spent {
                 keep.push(sub);
             }
         }
-        // Anything queued *during* firing lands after the survivors.
+
+        // Closures we just ran may have registered new subscriptions — those landed
+        // on the (currently empty) real list. Scoop them up behind the survivors so
+        // nothing gets dropped, then put everything back on the Duel.
         keep.append(&mut self.subscriptions);
         self.subscriptions = keep;
+
+        // ============ STEP 2: EXPIRE ============
+        // Deliberately after step 1, and deliberately over the list as it stands NOW
+        // (which includes anything step 1 just registered). That's what makes a
+        // "this turn" rule created during the End Phase die on the spot instead of
+        // surviving into next turn.
+
+        let subs = std::mem::take(&mut self.subscriptions);
+
+        // This time split on `until` — "which subscriptions does this event KILL?"
+        let (expired, keep): (Vec<Subscription>, Vec<Subscription>) =
+            subs.into_iter().partition(|s| s.until == Some(event.code));
+
+        // Put the survivors back first. The expiring ones are already out of the
+        // list, so their final call can't accidentally re-fire them.
+        self.subscriptions = keep;
+
+        for sub in expired {
+            // `true` = teardown call. The closure gets the event in its SECOND slot,
+            // which is how a card tells "I'm being removed" from "do the thing".
+            self.run_subscription(&sub, event, true);
+        }
+    }
+
+    /// Run one subscription's closure. Restores the registering effect's context
+    /// first (`activator`/`self_card`/`event`) so relative verbs like `e:draw(YOU,..)`
+    /// still mean the right player, then drains whatever it recorded.
+    ///
+    /// The closure is called as `fn(ev, until_ev)` with exactly one non-nil: `ev`
+    /// on a normal firing, `until_ev` when the subscription is being removed.
+    fn run_subscription(&mut self, sub: &Subscription, event: &EventSnapshot, expiring: bool) {
+        {
+            // Put back WHO this rule belongs to before the closure runs. This is the
+            // whole reason `Subscription` carries an owner: the scratchpad is shared,
+            // so by now `activator` holds whatever effect resolved most recently —
+            // probably the opponent's. Without this line, Maxx "C"'s `draw(YOU, 1)`
+            // could hand the card to the wrong player.
+            let mut ctx = self.effect_ctx.borrow_mut();
+            ctx.activator = sub.owner;
+            ctx.self_card = sub.self_card;
+            ctx.event = event.clone(); // so `e:get_event_detail` works in here too
+        } // borrow ends here — the Lua call below needs the scratchpad free
+
+        let table = self.event_table(event);
+
+        // The closure signature is fn(ev, until_ev). Exactly one is filled in, and
+        // WHICH one tells the card what kind of call this is:
+        let args = match table {
+            // teardown: "you're being removed" → second slot
+            Some(t) if expiring => (mlua::Value::Nil, mlua::Value::Table(t)),
+            // normal firing: "the thing happened" → first slot
+            Some(t) => (mlua::Value::Table(t), mlua::Value::Nil),
+            // couldn't build the table (shouldn't happen) — still call it, empty
+            None => (mlua::Value::Nil, mlua::Value::Nil),
+        };
+
+        // Ignore a Lua error here: one broken card shouldn't kill the whole duel.
+        let _ = sub.func.call::<()>(args);
+
+        // The closure only WROTE DOWN what it wants (destroy/move/draw/modifiers).
+        // Nothing has happened yet — this is the line that actually does it.
+        self.drain_effect_ops();
+    }
+
+    /// A whole event as a Lua table: `code` plus every detail under its own key.
+    /// So `ev.code` and `ev.destroyed_card` both just work on the card side.
+    fn event_table(&self, event: &EventSnapshot) -> Option<mlua::Table> {
+        let table = self.vm.create_table().ok()?;
+        table.set("code", event.code).ok()?;
+        // `details` is a BTreeMap, so this walk is always in the same order —
+        // determinism rule 5. A Lua table built from a HashMap could differ per run.
+        for (key, detail) in &event.details {
+            let value = crate::effect::detail_to_lua(&self.vm, detail).ok()?;
+            table.set(key.as_str(), value).ok()?;
+        }
+        Some(table)
     }
 
     // ===== M4/M5: the coroutine bridge ======================================
@@ -436,6 +563,20 @@ impl Duel {
         }
     }
 
+    /// Apply the effect's `draw` intents.
+    fn handle_draws(&mut self) {
+        // Take the list OUT of the scratchpad first. `self.draw` needs `&mut self`,
+        // and we'd still be holding a borrow of the scratchpad if we looped over it
+        // in place — Rust would refuse. Copy out, let go, then act.
+        let to_draw: Vec<(usize, usize)> = self.effect_ctx.borrow_mut().to_draw.drain(..).collect();
+        for (player, count) in to_draw {
+            // The verb already turned YOU/OPPONENT into a real player number, so
+            // this is just "give player N their cards". `draw` also handles the
+            // deck-out loss if there aren't enough left.
+            self.draw(player, count);
+        }
+    }
+
     /// Apply the effect's `send` intents — plain relocations, NOT destructions
     /// (no reason stamped, no `EVENT_DESTROYED`).
     fn handle_moves(&mut self) {
@@ -472,11 +613,32 @@ impl Duel {
         let mut fired: Vec<(usize, CardId, usize, EventSnapshot)> = Vec::new();
 
         while let Some(event) = self.events.pop_front() {
-            let Some(card) = self.get_card(event.card) else {
+            // Freeze the event's details right now. The trigger it fires might not
+            // resolve for a while (several chain links deep), and by then this event
+            // is long gone from the queue — so the link carries a copy.
+            let snapshot = EventSnapshot {
+                code: event.code,
+                details: event.details,
+            };
+
+            // Subscriptions go FIRST, before any trigger is placed on the chain.
+            // They're the "immediately, without using the chain" lane — a Maxx "C"
+            // draw isn't something the opponent can respond to. (EDOPro splits the
+            // same two lanes in `process_instant_event`, processor.cpp:1173.)
+            self.fire_subscriptions(&snapshot);
+
+            // Now the trigger lane. A global event (a battle ending, a turn ending)
+            // has no card, so nothing can have a "when THIS card ..." trigger on it
+            // — subscriptions were the whole point of raising it.
+            let Some(card_id) = event.card else {
+                continue;
+            };
+            // Card's gone (already left the field)? Nothing to hang a trigger on.
+            let Some(card) = self.get_card(card_id) else {
                 continue;
             };
             let card_code = card.code;
-            let player = self.controller_of(event.card);
+            let player = self.controller_of(card_id);
             let indexes: Vec<usize> = self
                 .effects
                 .borrow()
@@ -490,11 +652,6 @@ impl Duel {
                 .map(|(i, _)| i)
                 .collect();
 
-            // Freeze the event's details so the resolving trigger can query them.
-            let snapshot = EventSnapshot {
-                code: event.code,
-                details: event.details,
-            };
             for idx in indexes {
                 self.effect_ctx.borrow_mut().activator = player;
                 let t = self.effects.borrow()[idx].1.clone();
@@ -505,12 +662,12 @@ impl Duel {
                     self.processor_stack.push(Processor::OptionalTrigger {
                         step: 0,
                         effect: idx,
-                        card: event.card,
+                        card: card_id,
                         player,
                         event: snapshot.clone(),
                     });
                 } else {
-                    fired.push((idx, event.card, player, snapshot.clone()));
+                    fired.push((idx, card_id, player, snapshot.clone()));
                 }
             }
         }
