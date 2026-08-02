@@ -38,6 +38,33 @@ end
 -- The monsters a player controls (`who` relative to the activating player).
 function Effect:monster_zone(who) return effect_monster_zone(who) end
 
+-- Is THIS card (the one running the effect) in `who`'s hand? (`who` relative to
+-- the activating player.) Lets a hand-only effect gate on its own location.
+function Effect:in_hand(who) return effect_in_hand(who) end
+
+-- Declare "discard this card" as a cost: when the cost is paid, this very card is
+-- sent from the hand to the GY.
+function Effect:discard_self() effect_discard_self() end
+
+-- The battle damage the activating player is about to take at the current damage
+-- step (0 outside a damage-calculation window).
+function Effect:battle_damage() return effect_battle_damage() end
+
+-- Whose turn it is, relative to the activator: YOU on your own turn, OPPONENT on
+-- theirs. (Kuriboh checks `current_player() == OPPONENT` — "the opponent attacked".)
+function Effect:current_player() return effect_current_player() end
+
+-- Grant a PLAYER modifier: a MOD_* code (+ optional value), on `who` relative to
+-- the activator. Returns the new modifier's id (for remove_modifier later).
+function Effect:add_player_modifier(who, code, value) return effect_add_player_modifier(who, code, value) end
+
+-- Remove the single modifier with `id`.
+function Effect:remove_modifier(id) effect_remove_modifier(id) end
+
+-- Run `fn` when `event` fires, per the { count, period } frequency. Pass `fn` as a
+-- closure so it can capture locals (a bound method `e:method` isn't a valid value).
+function Effect:queue(event, freq, fn) effect_queue(event, freq, fn) end
+
 -- Base class for cards.
 Card         = {}
 Card.__index = Card

@@ -15,7 +15,7 @@ use std::rc::Rc;
 use mlua::Lua;
 use slotmap::{Key, KeyData};
 
-use crate::{field::Field, ids::CardId, zone::Zone};
+use crate::{field::Field, ids::CardId, modifiers::ModifierType, zone::Zone};
 
 /// Scratchpad shared between the `Duel` and the effect currently resolving.
 /// Verbs on `e` write here; the `Duel` reads it back.
@@ -32,7 +32,38 @@ pub struct EffectContext {
     /// all payable, then applies them ("describe, then execute").
     pub costs: Vec<CostType>,
     pub activator: usize,
+    /// Whose turn it currently is (mirrors the duel's turn player). Lets a verb like
+    /// `current_player` answer YOU/OPPONENT relative to the activator.
+    pub turn_player: usize,
     pub candidates: Vec<CardId>,
+    /// WHICH card instance is running this effect — so verbs like `in_hand`/
+    /// `discard_self` act on *this* card, not just its printed code. Set whenever
+    /// the engine runs an effect stage for a specific card.
+    pub self_card: Option<CardId>,
+    /// Battle damage each player is *about to* take at the current damage step —
+    /// set before the damage-calc window opens, read by `e:battle_damage()`, then
+    /// applied once the window closes.
+    pub pending_damage: [u32; 2],
+    /// A monotonically increasing counter handing each new modifier a unique id.
+    /// Shared (it lives in `ctx`) so a Lua verb can stamp an id and hand it back
+    /// synchronously while the `Duel` applies the add afterward.
+    pub next_modifier_id: u32,
+    /// Player modifiers a verb asked to add — `(id, player, source, kind)`, applied
+    /// by the `Duel` after the stage ("describe, then execute").
+    pub player_mods_to_add: Vec<(u32, usize, CardId, ModifierType)>,
+    /// Modifier ids a verb asked to remove, applied by the `Duel` afterward.
+    pub mods_to_remove: Vec<u32>,
+    /// Event subscriptions a verb queued, drained onto the `Duel` afterward.
+    pub subscriptions_to_add: Vec<Subscription>,
+}
+
+/// A queued reaction: run `func` when `event` fires, up to `remaining` more times.
+/// (The `{count, period}` frequency's *period* isn't modeled yet — only the count.)
+#[derive(Debug)]
+pub struct Subscription {
+    pub event: u32,
+    pub remaining: u32,
+    pub func: mlua::Function,
 }
 
 /// A cost an effect declares in its `cost` stage. New cost kinds get a variant
@@ -41,6 +72,8 @@ pub struct EffectContext {
 pub enum CostType {
     /// Pay N life points.
     LifePoints(u32),
+    /// Discard a specific card (send it from the hand to the GY).
+    Discard(CardId),
 }
 
 /// How/where an effect is activated. The integer values match the prelude's
@@ -165,10 +198,94 @@ pub fn register_verbs(
     // e:monster_zone(who) -> the monsters `who` controls; `who` is relative to
     // the activating player (YOU = same, OPPONENT = the other).
     let c = ctx.clone();
+    let f = field.clone();
     let monster_zone = lua.create_function(move |_, who: usize| {
         let actual = (who + c.borrow().activator) % 2;
-        Ok(encode_ids(&field.borrow().monster_zone(actual)))
+        Ok(encode_ids(&f.borrow().monster_zone(actual)))
     })?;
+
+    // e:in_hand(who) -> is THIS effect's card in `who`'s hand? `who` is relative to
+    // the activator (YOU/OPPONENT). False if we don't know the self card.
+    let c = ctx.clone();
+    let f = field.clone();
+    let in_hand = lua.create_function(move |_, who: usize| {
+        let ctx = c.borrow();
+        let Some(self_card) = ctx.self_card else {
+            return Ok(false);
+        };
+        let actual = (who + ctx.activator) % 2;
+        Ok(f.borrow().contains(actual, self_card, Zone::Hand))
+    })?;
+
+    // e:discard_self() -> declare "discard this card" as a cost: the self card is
+    // sent to the GY when the cost is paid.
+    let c = ctx.clone();
+    let discard_self = lua.create_function(move |_, ()| {
+        let self_card = c.borrow().self_card;
+        if let Some(card) = self_card {
+            c.borrow_mut().costs.push(CostType::Discard(card));
+        }
+        Ok(())
+    })?;
+
+    // e:battle_damage() -> the battle damage the activator is about to take at the
+    // current damage step (0 outside a damage-calc window).
+    let c = ctx.clone();
+    let battle_damage = lua.create_function(move |_, ()| {
+        let ctx = c.borrow();
+        Ok(ctx.pending_damage[ctx.activator])
+    })?;
+
+    // e:current_player() -> whose turn it is, relative to the activator: YOU (0) on
+    // the activator's own turn, OPPONENT (1) on the other player's turn.
+    let c = ctx.clone();
+    let current_player = lua.create_function(move |_, ()| {
+        let ctx = c.borrow();
+        Ok((ctx.turn_player + ctx.activator) % 2)
+    })?;
+
+    // e:add_player_modifier(who, code, value?) -> grant a player modifier and
+    // return its new id. `who` is YOU/OPPONENT relative to the activator; the
+    // modifier is sourced to this effect's card. The add is applied by the Duel
+    // after the stage; the id is stamped now so a closure can capture it.
+    let c = ctx.clone();
+    let add_player_modifier =
+        lua.create_function(move |_, (who, code, value): (usize, u32, Option<i32>)| {
+            let mut ctx = c.borrow_mut();
+            let Some(source) = ctx.self_card else {
+                return Ok(0u32);
+            };
+            let Some(mod_type) = ModifierType::from_code(code, value.unwrap_or(0)) else {
+                return Ok(0u32);
+            };
+            ctx.next_modifier_id += 1;
+            let id = ctx.next_modifier_id;
+            let player = (who + ctx.activator) % 2;
+            ctx.player_mods_to_add.push((id, player, source, mod_type));
+            Ok(id)
+        })?;
+
+    // e:remove_modifier(id) -> drop the one modifier with that id (applied after).
+    let c = ctx.clone();
+    let remove_modifier = lua.create_function(move |_, id: u32| {
+        c.borrow_mut().mods_to_remove.push(id);
+        Ok(())
+    })?;
+
+    // e:queue(event, {count, period}, fn) -> run `fn` when `event` fires, `count`
+    // times. (period reserved.) The closure persists on the Duel.
+    let c = ctx.clone();
+    let queue = lua.create_function(
+        move |_, (event, freq, func): (u32, mlua::Table, mlua::Function)| {
+            let count = freq.get::<u32>(1).unwrap_or(1);
+            c.borrow_mut().subscriptions_to_add.push(Subscription {
+                event,
+                remaining: count,
+                func,
+            });
+            Ok(())
+        },
+    )?;
 
     lua.globals().set("effect_destroy", destroy)?;
     lua.globals().set("effect_send", send)?;
@@ -177,6 +294,15 @@ pub fn register_verbs(
     lua.globals()
         .set("effect_prompt_selection", prompt_selection)?;
     lua.globals().set("effect_monster_zone", monster_zone)?;
+    lua.globals().set("effect_in_hand", in_hand)?;
+    lua.globals().set("effect_discard_self", discard_self)?;
+    lua.globals().set("effect_battle_damage", battle_damage)?;
+    lua.globals().set("effect_current_player", current_player)?;
+    lua.globals()
+        .set("effect_add_player_modifier", add_player_modifier)?;
+    lua.globals()
+        .set("effect_remove_modifier", remove_modifier)?;
+    lua.globals().set("effect_queue", queue)?;
 
     Ok(())
 }

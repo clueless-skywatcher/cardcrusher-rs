@@ -7,8 +7,9 @@
 use mlua::thread::ThreadStatus;
 
 use crate::chain::ChainLink;
-use crate::effect::{spell_speed, CostType, EffectKind};
+use crate::effect::{spell_speed, CostType, EffectKind, Subscription};
 use crate::ids::CardId;
+use crate::modifiers::{Modifier, ModifierType};
 use crate::processor::{DuelStatus, Processor};
 use crate::zone::Zone;
 
@@ -57,6 +58,8 @@ impl Duel {
             // EDOPro `check_lp_cost`: payable iff the cost is ≤ their LP (paying
             // down to exactly 0 is legal).
             CostType::LifePoints(n) => self.life_points(player) >= *n,
+            // Discard is payable while the card is actually in the hand.
+            CostType::Discard(card) => self.zone_of(*card) == Some(Zone::Hand),
         }
     }
 
@@ -64,6 +67,8 @@ impl Duel {
     fn apply_cost(&mut self, cost: &CostType, player: usize) {
         match cost {
             CostType::LifePoints(n) => self.pay_lp(player, *n),
+            // A discard is a plain send (hand → GY), NOT a destruction.
+            CostType::Discard(card) => self.send_to(*card, Zone::GY),
         }
     }
 
@@ -74,7 +79,64 @@ impl Duel {
 
         self.handle_destroys();
         self.handle_moves();
+        self.apply_script_ops();
         Ok(())
+    }
+
+    /// Apply the modifier/subscription intents a stage's verbs recorded into `ctx`
+    /// ("describe, then execute"): grant player modifiers, remove by id, and enrol
+    /// any queued event subscriptions onto the duel.
+    fn apply_script_ops(&mut self) {
+        let adds: Vec<(u32, usize, CardId, ModifierType)> = self
+            .effect_ctx
+            .borrow_mut()
+            .player_mods_to_add
+            .drain(..)
+            .collect();
+        for (id, player, source, mod_type) in adds {
+            self.player_modifiers[player].push(Modifier {
+                id,
+                source,
+                mod_type,
+            });
+        }
+
+        let removes: Vec<u32> = self
+            .effect_ctx
+            .borrow_mut()
+            .mods_to_remove
+            .drain(..)
+            .collect();
+        for id in removes {
+            self.remove_modifier(id);
+        }
+
+        let subs: Vec<Subscription> = self
+            .effect_ctx
+            .borrow_mut()
+            .subscriptions_to_add
+            .drain(..)
+            .collect();
+        self.subscriptions.extend(subs);
+    }
+
+    /// Raise `event`: run every subscription waiting on it (once each), applying
+    /// whatever their closures record, and keep those with firings left.
+    pub fn fire_subscriptions(&mut self, event: u32) {
+        let subs = std::mem::take(&mut self.subscriptions);
+        let (fired, mut keep): (Vec<Subscription>, Vec<Subscription>) =
+            subs.into_iter().partition(|s| s.event == event);
+        for mut sub in fired {
+            let _ = sub.func.call::<()>(());
+            self.apply_script_ops();
+            sub.remaining = sub.remaining.saturating_sub(1);
+            if sub.remaining > 0 {
+                keep.push(sub);
+            }
+        }
+        // Anything queued *during* firing lands after the survivors.
+        keep.append(&mut self.subscriptions);
+        self.subscriptions = keep;
     }
 
     // ===== M4/M5: the coroutine bridge ======================================
@@ -103,9 +165,14 @@ impl Duel {
         // moves to the field on activation and to the GY after it resolves.
         let is_spell = self.effect_kind(&effect) == EffectKind::Activate;
 
-        // Set the activator BEFORE `condition` — a condition can ask about
-        // YOU/OPPONENT, which are relative to the activating player.
-        self.effect_ctx.borrow_mut().activator = player;
+        // Set the activator + self card BEFORE `condition` — a condition can ask
+        // about YOU/OPPONENT (relative to the activating player) or about THIS
+        // card's own location (`in_hand`).
+        {
+            let mut ctx = self.effect_ctx.borrow_mut();
+            ctx.activator = player;
+            ctx.self_card = Some(card);
+        }
         if !self.check_condition(&effect)? {
             return Ok(DuelStatus::End);
         }
@@ -280,7 +347,11 @@ impl Duel {
         player: usize,
         out: &mut Vec<(CardId, usize)>,
     ) {
-        self.effect_ctx.borrow_mut().activator = player;
+        {
+            let mut ctx = self.effect_ctx.borrow_mut();
+            ctx.activator = player;
+            ctx.self_card = Some(card);
+        }
         for (slot, effect) in self.effects_of(card).iter().enumerate() {
             if self.effect_kind(effect) == want
                 && self.check_condition(effect).unwrap_or(false)
@@ -304,7 +375,11 @@ impl Duel {
         let Some(data) = self.card_data(card) else {
             return;
         };
-        self.effect_ctx.borrow_mut().activator = player;
+        {
+            let mut ctx = self.effect_ctx.borrow_mut();
+            ctx.activator = player;
+            ctx.self_card = Some(card);
+        }
         for (slot, effect) in self.effects_of(card).iter().enumerate() {
             let kind = self.effect_kind(effect);
             let speed = spell_speed(kind, data.card_type, data.spell_type, data.trap_type);
@@ -461,14 +536,57 @@ impl Duel {
         self.responder
     }
 
-    /// The effects the current responder may chain onto the top link right now, as
-    /// `(card, effect slot)` — what a `MSG_SELECT_CHAIN` prompt offers (besides
-    /// "pass"). Empty if there's no chain.
+    /// The effects the current responder may activate in the open window, as
+    /// `(card, effect slot)` — what a `MSG_SELECT_CHAIN` prompt offers besides
+    /// "pass". See [`Duel::response_options_for`].
     pub fn chain_response_options(&self) -> Vec<(CardId, usize)> {
+        self.response_options_for(self.responder)
+    }
+
+    /// The effects `player` may activate in whatever response window is open:
+    /// - a **chain** is building → the spell-speed-gated `chainable_effects`;
+    /// - no chain but a **timing window** is open (e.g. damage calculation) →
+    ///   QUICK effects in their hand whose `event` matches that timing;
+    /// - neither → nothing.
+    pub fn response_options_for(&self, player: usize) -> Vec<(CardId, usize)> {
         match self.chain.last() {
-            Some(top) => self.chainable_effects(self.responder, top),
-            None => Vec::new(),
+            Some(top) => self.chainable_effects(player, top),
+            None => match self.window_timing {
+                Some(timing) => self.timed_hand_quick_effects(player, timing),
+                None => Vec::new(),
+            },
         }
+    }
+
+    /// QUICK effects in `player`'s hand whose `event` matches `timing` and whose
+    /// `condition` currently passes — the ones that may start a chain at a timing
+    /// window (e.g. Kuriboh at damage calculation). The chain is empty here, so
+    /// there's no top link to gate against; QUICK is spell speed 2, enough to open.
+    fn timed_hand_quick_effects(&self, player: usize, timing: u32) -> Vec<(CardId, usize)> {
+        let hand: Vec<CardId> = {
+            let f = self.field.borrow();
+            (0..f.hand_count(player))
+                .filter_map(|i| f.hand_card(player, i))
+                .collect()
+        };
+
+        let mut out = Vec::new();
+        for card in hand {
+            {
+                let mut ctx = self.effect_ctx.borrow_mut();
+                ctx.activator = player;
+                ctx.self_card = Some(card);
+            }
+            for (slot, effect) in self.effects_of(card).iter().enumerate() {
+                if self.effect_kind(effect) == EffectKind::Quick
+                    && effect.get::<u32>("event").unwrap_or(0) == timing
+                    && self.check_condition(effect).unwrap_or(false)
+                {
+                    out.push((card, slot));
+                }
+            }
+        }
+        out
     }
 
     pub fn resolve_chain(&mut self) {
@@ -477,6 +595,7 @@ impl Duel {
                 let mut ctx = self.effect_ctx.borrow_mut();
                 ctx.activator = link.activator;
                 ctx.targets = link.targets;
+                ctx.self_card = Some(link.card);
             }
 
             let _ = self.resolve_effect(link.effect_seq);

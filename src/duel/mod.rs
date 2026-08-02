@@ -27,10 +27,11 @@ use slotmap::SlotMap;
 use crate::card::{Card, CardData};
 use crate::chain::ChainLink;
 use crate::constants::DuelMessage;
-use crate::effect::EffectContext;
+use crate::effect::{EffectContext, Subscription};
 use crate::event::DuelEvent;
 use crate::field::Field;
 use crate::ids::CardId;
+use crate::modifiers::Modifier;
 use crate::processor::Processor;
 
 pub struct Duel {
@@ -87,6 +88,13 @@ pub struct Duel {
     /// The player whose chain-response window is currently open (for the UI to
     /// show *whose* turn it is to respond, and their chainable options).
     responder: usize,
+    /// The timing of the open response window while **no chain** is building —
+    /// e.g. `EVENT_PRE_DAMAGE_CALCULATION` during a damage step. `None` outside
+    /// such a window. Lets the window offer timing-matched QUICK effects.
+    window_timing: Option<u32>,
+    player_modifiers: [Vec<Modifier>; 2],
+    /// Queued event reactions (from `e:queue`) — fired when their event is raised.
+    subscriptions: Vec<Subscription>,
 }
 
 impl Default for Duel {
@@ -140,6 +148,9 @@ impl Duel {
             chain: Vec::new(),
             passes: [false, false],
             responder: 0,
+            window_timing: None,
+            player_modifiers: [vec![], vec![]],
+            subscriptions: Vec::new(),
         };
         duel.load_prelude();
         duel
@@ -193,7 +204,7 @@ impl Duel {
         // every build runs the byte-identical prelude (determinism). Constant
         // tables load first; the base classes (`base.lua`) load last and may use
         // them. Cards are loaded later still and rely on all of it.
-        const PRELUDE: [(&str, &str); 11] = [
+        const PRELUDE: [(&str, &str); 12] = [
             ("players", include_str!("prelude/players.lua")),
             ("effect_kinds", include_str!("prelude/effect_kinds.lua")),
             ("categories", include_str!("prelude/categories.lua")),
@@ -205,6 +216,7 @@ impl Duel {
             ("races", include_str!("prelude/races.lua")),
             ("base", include_str!("prelude/base.lua")),
             ("events", include_str!("prelude/events.lua")),
+            ("modifiers", include_str!("prelude/modifiers.lua")),
         ];
         for (name, src) in PRELUDE {
             self.vm

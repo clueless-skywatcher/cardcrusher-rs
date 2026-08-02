@@ -2,6 +2,8 @@
 //! heartbeat: run the top task one step at a time, pausing to ask humans.
 
 use crate::constants::*;
+use crate::event::{EVENT_BATTLE_ENDED, EVENT_POST_DAMAGE_CALCULATION};
+use crate::ids::CardId;
 use crate::processor::{DuelStatus, Processor};
 
 use super::Duel;
@@ -117,6 +119,7 @@ impl Duel {
             Processor::Turn { step, player } => {
                 if *step == 0 {
                     self.turn_hist.push(*player);
+                    self.effect_ctx.borrow_mut().turn_player = *player;
                     // Fresh turn → each player's Normal Summon is available again.
                     self.reset_normal_summons();
                     self.reset_attacks();
@@ -332,25 +335,63 @@ impl Duel {
                 player,
             } => match step {
                 // Step 0: with opponent monsters, freeze to pick a target;
-                // otherwise it's a direct attack — declare and resolve now.
+                // otherwise it's a direct attack — declare it and open the
+                // before-damage-calculation window, resuming at step 2 after.
                 0 => {
                     if self.attack_targets(*player).is_empty() {
                         self.declare_attack(*attacker, None);
-                        self.resolve_battle(*attacker, None);
-                        self.reopen_battle_menu(*player);
+                        self.resume_attack_at(2, *attacker, *player);
+                        self.open_before_damage_window(*attacker, None);
                         true
                     } else {
                         self.messages.push(MSG_SELECT_ATTACK_TARGET);
-                        *step += 1;
+                        *step = 1;
                         false
                     }
                 }
-                // Step 1: the picked target → declare, then resolve the battle.
-                _ => {
+                // Step 1: the picked target → declare + open the before-damage
+                // window, resuming at step 2 after it closes.
+                1 => {
                     let idx = self.responses.first().copied().unwrap_or(0) as usize;
                     let target = self.attack_targets(*player).get(idx).copied();
                     self.declare_attack(*attacker, target);
-                    self.resolve_battle(*attacker, target);
+                    self.resume_attack_at(2, *attacker, *player);
+                    self.open_before_damage_window(*attacker, target);
+                    true
+                }
+                // Step 2: the before-damage window has closed. Resolve anything
+                // chained there (e.g. Kuriboh), apply the battle, then open the
+                // after-damage-calculation window, resuming at step 3 after.
+                2 => {
+                    if !self.chain.is_empty() {
+                        self.resolve_chain();
+                    }
+                    self.window_timing = None;
+                    let (a, target) = self.last_attack.expect("an attack was declared");
+                    // A player protected by a NoBattleDamage modifier (e.g. Kuriboh)
+                    // takes none of the pending battle damage.
+                    let mut dmg = self.effect_ctx.borrow().pending_damage;
+                    for (p, d) in dmg.iter_mut().enumerate() {
+                        if !self.can_take_battle_damage(p) {
+                            *d = 0;
+                        }
+                    }
+                    self.apply_battle_damage(dmg);
+                    self.apply_battle_destruction(a, target);
+                    self.effect_ctx.borrow_mut().pending_damage = [0, 0];
+                    self.resume_attack_at(3, *attacker, *player);
+                    self.open_event_window(EVENT_POST_DAMAGE_CALCULATION);
+                    true
+                }
+                // Step 3: the after-damage window has closed → the battle is over.
+                // Raise EVENT_BATTLE_ENDED (fires "that battle" subscriptions, e.g.
+                // Kuriboh removing its modifier), then back to the menu.
+                _ => {
+                    if !self.chain.is_empty() {
+                        self.resolve_chain();
+                    }
+                    self.window_timing = None;
+                    self.fire_subscriptions(EVENT_BATTLE_ENDED);
                     self.reopen_battle_menu(*player);
                     true
                 }
@@ -403,8 +444,9 @@ impl Duel {
                         }
                         CMD_RESPONSE => {
                             let effect_index = self.responses[1] as usize;
-                            let top = self.chain.last().expect("a response needs a chain");
-                            let (card, slot) = self.chainable_effects(*player, top)[effect_index];
+                            // Works for a chain (spell-speed gated) OR a timing
+                            // window with no chain yet (e.g. damage calculation).
+                            let (card, slot) = self.response_options_for(*player)[effect_index];
                             // `activate` funnels through `push_chain_link`, which
                             // resets `passes` — no need to reset again here.
                             let _ = self.activate(card, slot, *player);
@@ -426,6 +468,17 @@ impl Duel {
     fn reopen_battle_menu(&mut self, player: usize) {
         self.processor_stack
             .push(Processor::BattleCommand { step: 0, player });
+    }
+
+    /// Queue the `Attack` flow to resume at `step` once a pushed sub-window (the
+    /// before/after-damage response window) finishes. Call this BEFORE opening the
+    /// window, so the window lands on top of the stack and runs first.
+    fn resume_attack_at(&mut self, step: u16, attacker: CardId, player: usize) {
+        self.processor_stack.push(Processor::Attack {
+            step,
+            attacker,
+            player,
+        });
     }
 
     pub fn chain_length(&self) -> usize {

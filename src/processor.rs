@@ -54,8 +54,9 @@ pub enum Processor {
         step: Step,
         player: usize,
     },
-    /// A declared attack in progress: `attacker` picks a target (or attacks
-    /// directly), then the attack is declared.
+    /// A declared attack in progress. Its steps: pick a target (or attack
+    /// directly) → declare → open the damage-calc window → **apply** the battle
+    /// once that window closes.
     Attack {
         step: Step,
         attacker: CardId,

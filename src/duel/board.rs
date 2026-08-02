@@ -5,6 +5,8 @@ use crate::card::{Card, CardData};
 use crate::constants::{PLAYER_0, PLAYER_1};
 use crate::event::{DuelEvent, EVENT_BATTLE_DESTROYED, EVENT_DESTROYED};
 use crate::ids::CardId;
+use crate::modifiers::ModifierType::{AtkChange, DefChange, SetAtk, SetDef};
+use crate::modifiers::{Modifier, ModifierType};
 use crate::position::Position;
 use crate::reason::{Reason, REASON_BATTLE, REASON_DESTROY};
 use crate::zone::Zone;
@@ -37,13 +39,53 @@ impl Duel {
         self.get_card(card).map(|c| &c.data)
     }
 
-    /// A monster's ATK / DEF — the numbers the Battle Phase compares.
+    /// A monster's ATK — its printed value with every ATK modifier folded in, by
+    /// priority (`SetAtk` before `AtkChange`; ties in insertion order), floored at
+    /// 0. `SetAtk` establishes the value, `AtkChange` stacks on top.
     pub fn atk_of(&self, card: CardId) -> Option<i32> {
-        self.get_card(card).map(|c| c.data.atk)
+        let card = self.cards.get(card)?;
+        // Gather ATK modifiers and stable-sort by priority (insertion breaks ties).
+        let mut mods: Vec<ModifierType> = card
+            .modifiers
+            .iter()
+            .map(|m| m.mod_type)
+            .filter(|mt| matches!(mt, AtkChange(_) | SetAtk(_)))
+            .collect();
+        mods.sort_by_key(|mt| mt.priority());
+
+        let mut atk = card.data.atk;
+        for mt in mods {
+            match mt {
+                SetAtk(n) => atk = n,
+                AtkChange(n) => atk += n,
+                _ => {}
+            }
+        }
+        Some(atk.max(0))
     }
 
+    /// A monster's DEF — printed value with every DEF modifier folded in by
+    /// priority (`SetDef` before `DefChange`; ties in insertion order), floored at
+    /// 0. Symmetric with [`atk_of`].
     pub fn def_of(&self, card: CardId) -> Option<i32> {
-        self.get_card(card).map(|c| c.data.def)
+        let card = self.cards.get(card)?;
+        let mut mods: Vec<ModifierType> = card
+            .modifiers
+            .iter()
+            .map(|m| m.mod_type)
+            .filter(|mt| matches!(mt, DefChange(_) | SetDef(_)))
+            .collect();
+        mods.sort_by_key(|mt| mt.priority());
+
+        let mut def = card.data.def;
+        for mt in mods {
+            match mt {
+                SetDef(n) => def = n,
+                DefChange(n) => def += n,
+                _ => {}
+            }
+        }
+        Some(def.max(0))
     }
 
     /// A monster's level (for tribute/level checks later). `None` if the card
@@ -298,5 +340,75 @@ impl Duel {
             // win is sticky; we never "un-win" (e.g. a future heal above 0 LP).
             (false, false) => {}
         }
+    }
+
+    /// Hand out the next unique modifier id (counter lives in `ctx`, so a Lua verb
+    /// and the engine draw from the same sequence).
+    fn next_modifier_id(&self) -> u32 {
+        let mut ctx = self.effect_ctx.borrow_mut();
+        ctx.next_modifier_id += 1;
+        ctx.next_modifier_id
+    }
+
+    /// Add a modifier to `card`, tagged with the `source` card that produced it.
+    /// Returns the new modifier's id (for later `remove_modifier`).
+    pub fn add_modifier(&mut self, card_id: CardId, source: CardId, mod_type: ModifierType) -> u32 {
+        let id = self.next_modifier_id();
+        if let Some(card) = self.cards.get_mut(card_id) {
+            card.modifiers.push(Modifier {
+                id,
+                source,
+                mod_type,
+            });
+        }
+        id
+    }
+
+    /// Remove every modifier produced by `source` — from every card it touched
+    /// AND from both players' modifier lists — e.g. when the source's continuous
+    /// effect stops applying.
+    pub fn remove_modifiers_from(&mut self, source: CardId) {
+        for (_, card) in self.cards.iter_mut() {
+            card.modifiers.retain(|m| m.source != source);
+        }
+        for mods in self.player_modifiers.iter_mut() {
+            mods.retain(|m| m.source != source);
+        }
+    }
+
+    /// Remove the single modifier with `id` — from wherever it lives (any card or
+    /// either player's list).
+    pub fn remove_modifier(&mut self, id: u32) {
+        for (_, card) in self.cards.iter_mut() {
+            card.modifiers.retain(|m| m.id != id);
+        }
+        for mods in self.player_modifiers.iter_mut() {
+            mods.retain(|m| m.id != id);
+        }
+    }
+
+    /// Add a modifier to `player` (not a card), tagged with its `source`. Returns
+    /// the new modifier's id.
+    pub fn add_player_modifier(
+        &mut self,
+        player: usize,
+        source: CardId,
+        mod_type: ModifierType,
+    ) -> u32 {
+        let id = self.next_modifier_id();
+        self.player_modifiers[player].push(Modifier {
+            id,
+            source,
+            mod_type,
+        });
+        id
+    }
+
+    /// Whether `player` can currently take battle damage — false while any
+    /// `NoBattleDamage` modifier is in force for them (e.g. Kuriboh).
+    pub fn can_take_battle_damage(&self, player: usize) -> bool {
+        !self.player_modifiers[player]
+            .iter()
+            .any(|m| m.mod_type == ModifierType::NoBattleDamage)
     }
 }

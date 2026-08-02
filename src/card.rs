@@ -13,6 +13,8 @@
 //! materials:   Vec<CardId>      // "my Xyz materials" — a list of tickets
 //! ```
 
+use crate::modifiers::Modifier;
+
 /// The static definition of a card — its printed numbers, shared by every copy
 /// of that `code`. Mirrors EDOPro's `card_data` (`ocgcore/duel.h`): `type`,
 /// `attribute`, `race` are **bitmasks** (see the prelude's `TYPE_*`/
@@ -62,6 +64,7 @@ pub struct Card {
     /// [`crate::reason`]). Set by `Duel::destroy`; read by "destroyed by …"
     /// triggers once the event engine exists.
     pub reason: crate::reason::Reason,
+    pub modifiers: Vec<Modifier>,
 }
 
 impl Card {
